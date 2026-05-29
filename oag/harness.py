@@ -350,9 +350,9 @@ class Harness:
         parts.append("- 并行执行: 当有多个相互独立的子任务可以同时进行时，使用 dispatch_workers 并行执行以提高效率")
 
         parts.append("\n## 重要行为规则")
-        parts.append("- 当生成了多个候选方案（如清障方案、路线方案、资源调配方案）时，必须使用 ask_user 让用户选择，不要自行决定")
-        parts.append("- 当任务涉及优先级权衡（速度vs成本、安全vs效率等）时，使用 ask_user 确认用户偏好后再执行")
-        parts.append("- 当关键参数有多种合理取值（搜索半径、响应级别等）时，使用 ask_user 让用户确认")
+        parts.append("- 当存在多个可行方案时，必须使用 ask_user 让用户选择，不要自行决定")
+        parts.append("- 当任务涉及优先级或策略权衡时，使用 ask_user 确认用户偏好后再执行")
+        parts.append("- 当关键参数有多种合理取值时，使用 ask_user 让用户确认")
 
         if domain_context:
             parts.append(f"\n{domain_context}")
