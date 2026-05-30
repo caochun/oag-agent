@@ -139,6 +139,12 @@ class Agent:
         })
 
         yield from self._continue_loop(messages, session_id)
+
+        stop_result = self.harness.run_stop_check("", messages)
+        if stop_result:
+            messages.append({"role": "user", "content": stop_result})
+            yield from self._continue_loop(messages, session_id)
+
         self.sessions.save(session_id, messages)
 
     def chat_stream(self, message: str, session_id: str = "default") -> Generator[Event, None, None]:
@@ -180,13 +186,13 @@ class Agent:
                 if loop_warnings >= 2:
                     messages.append({
                         "role": "system",
-                        "content": f"[循环终止] 你已经反复调用 {fn}，无法继续。请根据已有信息直接给出回答。禁止再调用任何工具。",
+                        "content": f"[循环终止] 你已经连续多次调用 {fn}，每次都成功返回了相同的数据。数据获取没有问题，你已经拥有了 {fn} 返回的全部信息。请直接基于已获取的数据继续执行下一步操作，不要再调用 {fn}。",
                     })
                     recent_calls.clear()
                 else:
                     messages.append({
                         "role": "system",
-                        "content": f"[循环检测] 你已经连续调用 {fn} 3 次且结果相同。请停下来：检查已有结果，换一个工具，或直接给出回答。",
+                        "content": f"[提示] 你已经连续调用 {fn} 3 次，每次返回的数据相同。{fn} 已成功执行，数据已获取。请检查之前的返回结果，然后调用下一个工具继续流程。",
                     })
                     recent_calls.clear()
 
