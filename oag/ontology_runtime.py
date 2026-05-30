@@ -23,7 +23,7 @@ class OntologyRuntime:
         self.store = store
         self.registry = registry
         self.rule_engine = rule_engine
-        self._hint_shown: set[str] = set()
+        self._context_shown: set[str] = set()
         self._active_workflows: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
@@ -44,13 +44,7 @@ class OntologyRuntime:
             if obj.mutability:
                 extras.append(f"{'🔒' if obj.mutability == 'read_only' else '📝'}{obj.mutability}")
             if obj.excluded_functions:
-                extras.append(f"⛔不可调用: {', '.join(obj.excluded_functions)}")
-            if obj.status_transitions:
-                flows = "; ".join(f"{k}→{'|'.join(v)}" for k, v in obj.status_transitions.items())
-                extras.append(f"状态流转: {flows}")
-            for c in obj.constraints:
-                cond = ", ".join(f"{k}={v}" for k, v in c.when.items())
-                extras.append(f"约束({cond}): ⛔{', '.join(c.excluded_functions)} — {c.reason}")
+                extras.append(f"⛔{', '.join(obj.excluded_functions)}")
             suffix = f" | {' | '.join(extras)}" if extras else ""
             parts.append(f"- {name}{kind_label}: {line}{suffix}")
 
@@ -99,19 +93,11 @@ class OntologyRuntime:
             if fdef.function_type:
                 fn_parts.append(f"[{fdef.function_type}]")
             fn_parts.append(f": {(fdef.summary or '').strip().split(chr(10))[0]}")
-            if fdef.writes_to:
-                fn_parts.append(f" ⚠️writes_to: {', '.join(fdef.writes_to)}")
-            if fdef.preconditions:
-                reqs = ", ".join(f"{p.object}.{p.field}{p.operator}{p.value}" for p in fdef.preconditions)
-                fn_parts.append(f" 🔒requires: [{reqs}]")
-            if fdef.temporal_constraints:
-                slas = ", ".join(tc.sla for tc in fdef.temporal_constraints if tc.sla)
-                if slas:
-                    fn_parts.append(f" ⏱SLA: {slas}")
             fn_lines.append("".join(fn_parts))
         if fn_lines:
             parts.append("\n## 可用函数")
             parts.extend(fn_lines)
+            parts.append("(首次调用函数时系统会自动注入该函数的详细规则、前置条件和约束)")
 
         parts.append("\n## 工具使用规则")
         parts.append("- 查询数据: 使用 query/count/query_links")
@@ -351,19 +337,104 @@ class OntologyRuntime:
         return json.dumps({"error": f"未找到: {target}"}, ensure_ascii=False)
 
     # ------------------------------------------------------------------
-    # Hint injection
+    # Progressive context injection
     # ------------------------------------------------------------------
 
-    def inject_hint(self, fn_name: str, result: str) -> str:
-        notes: list[str] = []
-        fdef = self.registry.get_def(fn_name)
-        if fdef and fdef.hint and fn_name not in self._hint_shown:
-            notes.append(f"[函数 {fn_name} 的详细规则]\n{fdef.hint.strip()}")
-            self._hint_shown.add(fn_name)
+    def build_context_for_tool(self, fn_name: str) -> str | None:
+        if fn_name in self._context_shown:
+            return None
 
-        if notes:
-            return result + "\n\n" + "\n\n".join(notes)
-        return result
+        fdef = self.registry.get_def(fn_name)
+        if not fdef:
+            return None
+
+        has_detail = fdef.description or fdef.hint or fdef.preconditions or fdef.effects or fdef.temporal_constraints or fdef.writes_to
+        if not has_detail:
+            self._context_shown.add(fn_name)
+            return None
+
+        parts: list[str] = []
+
+        if fdef.description:
+            parts.append(f"说明: {fdef.description.strip()}")
+        if fdef.hint:
+            parts.append(f"规则: {fdef.hint.strip()}")
+        if fdef.preconditions:
+            reqs = "; ".join(f"{p.object}.{p.field} {p.operator} {p.value}" for p in fdef.preconditions)
+            parts.append(f"前置条件: {reqs}")
+        if fdef.effects:
+            effs = "; ".join(f"{e.object}.{e.field} → {e.set_to}" for e in fdef.effects)
+            parts.append(f"执行效果: {effs}")
+        if fdef.temporal_constraints:
+            slas = "; ".join(f"{tc.sla}({tc.deadline})" if tc.deadline else tc.sla for tc in fdef.temporal_constraints if tc.sla)
+            if slas:
+                parts.append(f"时间约束: {slas}")
+        if fdef.writes_to:
+            parts.append(f"写入对象: {', '.join(fdef.writes_to)}")
+
+        related_objects = set(fdef.writes_to or [])
+        for pre in fdef.preconditions:
+            related_objects.add(pre.object)
+        for eff in fdef.effects:
+            related_objects.add(eff.object)
+        for obj_name in fdef.involves_objects or []:
+            related_objects.add(obj_name)
+
+        obj_details = []
+        for obj_name in related_objects:
+            obj_def = self.ontology.objects.get(obj_name)
+            if not obj_def:
+                continue
+            props = ", ".join(f"{p}({d.type}{'*' if d.required else ''})" for p, d in obj_def.properties.items())
+            obj_info = f"  {obj_name}: {props}"
+            if obj_def.status_transitions:
+                flows = "; ".join(f"{k}→{'|'.join(v)}" for k, v in obj_def.status_transitions.items())
+                obj_info += f"\n    状态流转: {flows}"
+            for c in obj_def.constraints:
+                cond = ", ".join(f"{ck}={cv}" for ck, cv in c.when.items())
+                obj_info += f"\n    约束({cond}): ⛔{', '.join(c.excluded_functions)} — {c.reason}"
+            obj_details.append(obj_info)
+
+        if obj_details:
+            parts.append("关联对象详情:\n" + "\n".join(obj_details))
+
+        self._context_shown.add(fn_name)
+        return "\n".join(parts) if parts else None
+
+    def build_context_from_result(self, result: str) -> str | None:
+        obj_parts = []
+        for obj_name, obj_def in self.ontology.objects.items():
+            ctx_key = f"obj:{obj_name}"
+            if ctx_key in self._context_shown:
+                continue
+            if f'"{obj_name}"' not in result and f"'{obj_name}'" not in result and f"={obj_name}" not in result:
+                continue
+
+            has_detail = obj_def.description or obj_def.status_transitions or obj_def.constraints or obj_def.excluded_functions
+            if not has_detail:
+                continue
+
+            lines = [f"[对象 {obj_name} 的完整定义]"]
+            if obj_def.description:
+                lines.append(obj_def.description.strip())
+            if obj_def.excluded_functions:
+                lines.append(f"⛔不可调用: {', '.join(obj_def.excluded_functions)}")
+            if obj_def.status_transitions:
+                flows = "; ".join(f"{k}→{'|'.join(v)}" for k, v in obj_def.status_transitions.items())
+                lines.append(f"状态流转: {flows}")
+            for c in obj_def.constraints:
+                cond = ", ".join(f"{ck}={cv}" for ck, cv in c.when.items())
+                lines.append(f"约束({cond}): ⛔{', '.join(c.excluded_functions)} — {c.reason}")
+            props = ", ".join(f"{p}({d.type}{'*' if d.required else ''}): {d.description}" for p, d in obj_def.properties.items())
+            lines.append(f"属性: {props}")
+
+            obj_parts.append("\n".join(lines))
+            self._context_shown.add(ctx_key)
+
+        return "\n\n".join(obj_parts) if obj_parts else None
+
+    def reset_context_shown(self):
+        self._context_shown.clear()
 
     # ------------------------------------------------------------------
     # Workflow management

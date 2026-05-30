@@ -29,6 +29,7 @@ class ToolResult:
     blocked: bool = False
     block_reason: str = ""
     needs_confirmation: bool = False
+    context_note: str = ""
 
 
 @dataclass
@@ -53,11 +54,15 @@ def _default_stop_hook(context: dict) -> HookResult:
             if '"error"' in content or "不存在" in content:
                 tool_errors.append(content[:100])
 
+    incomplete_signals = ["正在进行", "下一步", "接下来", "即将", "稍后", "继续调用", "我将调用", "我将"]
+
     issues = []
     if not last_assistant:
         issues.append("未生成最终回答（可能工具调用轮次用尽）")
     elif len(last_assistant) < 20:
         issues.append("回复过短，可能未完整回答")
+    elif any(sig in last_assistant for sig in incomplete_signals):
+        issues.append("回复暗示任务未完成（含'正在进行/下一步/我将调用'等表述），请继续执行或给出最终结论")
     if tool_errors:
         issues.append(f"有工具执行出错未处理: {'; '.join(tool_errors[:2])}")
 
@@ -177,7 +182,11 @@ class Harness:
         if tool_name == "summarize_progress":
             self._current_messages = messages
         raw_result = tool.handler(args)
-        raw_result = self.ont.inject_hint(tool_name, raw_result)
+
+        fn_context = self.ont.build_context_for_tool(tool_name) or ""
+        result_context = self.ont.build_context_from_result(raw_result) or ""
+        context_parts = [p for p in [fn_context, result_context] if p]
+        context_note = "\n\n".join(context_parts)
 
         truncated_result = truncate_tool_result(raw_result, tool.max_result_chars)
         was_truncated = len(truncated_result) < len(raw_result)
@@ -198,6 +207,7 @@ class Harness:
 
         result = ToolResult(
             content=truncated_result, raw_content=raw_result, truncated=was_truncated,
+            context_note=context_note,
         )
 
         if tool.is_read_only:
@@ -260,7 +270,10 @@ class Harness:
         return self.ont.build_system_prompt(domain_context)
 
     def maybe_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
-        return self.context_mgr.maybe_compact(messages)
+        messages, compacted = self.context_mgr.maybe_compact(messages)
+        if compacted:
+            self.ont.reset_context_shown()
+        return messages, compacted
 
     def run_stop_check(self, user_question: str, messages: list[dict]) -> str | None:
         result = self.hooks.fire("query_complete", {

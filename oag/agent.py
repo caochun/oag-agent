@@ -165,12 +165,30 @@ class Agent:
 
     def _run_loop(self, messages: list[dict], session_id: str) -> Generator[Event, None, None]:
         tools = self.harness.build_tools()
+        recent_calls: list[str] = []
+        loop_warnings: int = 0
 
         for turn in range(self.harness.config.max_turns):
             if turn > 0 and turn % 5 == 0:
                 messages, compacted = self.harness.maybe_compact(messages)
                 if compacted:
                     yield CompactEvent()
+
+            if len(recent_calls) >= 3 and len(set(recent_calls[-3:])) == 1:
+                loop_warnings += 1
+                fn = recent_calls[-1]
+                if loop_warnings >= 2:
+                    messages.append({
+                        "role": "system",
+                        "content": f"[循环终止] 你已经反复调用 {fn}，无法继续。请根据已有信息直接给出回答。禁止再调用任何工具。",
+                    })
+                    recent_calls.clear()
+                else:
+                    messages.append({
+                        "role": "system",
+                        "content": f"[循环检测] 你已经连续调用 {fn} 3 次且结果相同。请停下来：检查已有结果，换一个工具，或直接给出回答。",
+                    })
+                    recent_calls.clear()
 
             response = call_llm_with_retry(
                 self.client,
@@ -207,6 +225,9 @@ class Agent:
             tool_calls_parsed = [
                 (tc, json.loads(tc.function.arguments)) for tc in msg.tool_calls
             ]
+
+            for tc, _ in tool_calls_parsed:
+                recent_calls.append(tc.function.name)
 
             if len(tool_calls_parsed) > 1:
                 from concurrent.futures import ThreadPoolExecutor
@@ -254,6 +275,12 @@ class Agent:
                     args=args,
                     result=result.content[:preview_len],
                 )
+
+                if result.context_note:
+                    messages.append({
+                        "role": "system",
+                        "content": f"[函数 {tc.function.name} 的详细规则和约束]\n{result.context_note}",
+                    })
 
                 messages.append({
                     "role": "tool",
