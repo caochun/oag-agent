@@ -60,6 +60,10 @@ class Agent:
         yield from self.confirmation_flow.confirm(pending, approved, answer)
 
     def chat_stream(self, message: str, session_id: str = "default") -> Generator[Event, None, None]:
+        if session_id in self._pending:
+            yield TextEvent(content="当前会话有待确认的操作，请先确认或取消后再继续。")
+            return
+
         messages = self.sessions.get(session_id)
 
         if not messages:
@@ -76,13 +80,19 @@ class Agent:
         yield from self.query_loop.run(state)
 
     def _set_pending_confirmation(self, session_id: str, tool_name: str, args: dict,
-                                  tool_call_id: str, messages: list[dict]):
+                                  tool_call_id: str, messages: list[dict],
+                                  state: RunState,
+                                  skipped_tool_calls: list[dict] | None = None):
         self._pending[session_id] = PendingConfirmation(
             session_id=session_id,
             tool_name=tool_name,
             args=args,
             tool_call_id=tool_call_id,
             messages=messages,
+            skipped_tool_calls=skipped_tool_calls,
+            user_question=state.user_question,
+            turn_count=state.turn_count,
+            stop_hook_active=state.stop_hook_active,
         )
 
     def sessions_save(self, session_id: str, messages: list[dict]):

@@ -41,6 +41,7 @@ class ConfirmationFlow:
                 "tool_call_id": pending.tool_call_id,
                 "content": json.dumps({"denied": True, "reason": "用户拒绝执行"}, ensure_ascii=False),
             })
+            self._append_skipped_tool_results(messages, pending)
             messages.append({
                 "role": "user",
                 "content": f"[系统提示] 用户拒绝了 {pending.tool_name} 的执行",
@@ -55,7 +56,8 @@ class ConfirmationFlow:
                 "tool_call_id": pending.tool_call_id,
                 "content": json.dumps({"answer": answer}, ensure_ascii=False),
             })
-            yield from self._continue(pending.session_id, messages)
+            self._append_skipped_tool_results(messages, pending)
+            yield from self._continue(pending.session_id, messages, pending)
             return
 
         context = ToolUseContext(
@@ -76,10 +78,27 @@ class ConfirmationFlow:
             "tool_call_id": pending.tool_call_id,
             "content": result.content,
         })
+        self._append_skipped_tool_results(messages, pending)
 
-        yield from self._continue(pending.session_id, messages)
+        yield from self._continue(pending.session_id, messages, pending)
 
-    def _continue(self, session_id: str, messages: list[dict]) -> Generator[Event, None, None]:
-        state = RunState(messages=messages, session_id=session_id)
+    def _append_skipped_tool_results(self, messages: list[dict],
+                                     pending: PendingConfirmation) -> None:
+        for skipped in pending.skipped_tool_calls or []:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": skipped["tool_call_id"],
+                "content": skipped["content"],
+            })
+
+    def _continue(self, session_id: str, messages: list[dict],
+                  pending: PendingConfirmation | None = None) -> Generator[Event, None, None]:
+        state = RunState(
+            messages=messages,
+            session_id=session_id,
+            user_question=pending.user_question if pending else "",
+            turn_count=pending.turn_count if pending else 0,
+            stop_hook_active=pending.stop_hook_active if pending else False,
+        )
         yield from self.run_loop(state)
         self.save_messages(session_id, messages)

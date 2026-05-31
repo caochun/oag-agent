@@ -22,6 +22,10 @@ class PendingConfirmation:
     args: dict
     tool_call_id: str
     messages: list[dict]
+    skipped_tool_calls: list[dict] | None = None
+    user_question: str = ""
+    turn_count: int = 0
+    stop_hook_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -32,3 +36,5 @@ class ToolUseContext:
     source: str = "main"
     agent_id: str | None = None
     allow_user_prompt: bool = True
+    cancelled: bool = False
+    storage_dir: str | None = None

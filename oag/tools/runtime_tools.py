@@ -32,6 +32,7 @@ class RuntimeTools:
             description="总结当前对话进展。返回已完成的操作摘要、使用的工具统计。适合长对话中回顾进度",
             parameters={"type": "object", "properties": {}},
             handler=lambda args: self._summarize_progress_handler(args),
+            usage_prompt="只在长对话、上下文复杂或用户询问进度时调用。不要用它替代最终回答。",
             category="query",
         ))
 
@@ -44,6 +45,7 @@ class RuntimeTools:
                 "multi_select": {"type": "boolean", "description": "是否允许多选（默认单选）"},
             }, "required": ["question", "options"]},
             handler=lambda args: json.dumps({"question": args.get("question", ""), "options": args.get("options", [])}, ensure_ascii=False),
+            usage_prompt="当关键参数、优先级、策略偏好存在多个合理选择时使用。问题要具体，options 通常提供 2-5 个互斥选项；不要询问可以通过只读工具直接查到的信息。",
             category="ask",
             requires_confirmation=True,
             policy=ToolPolicy(
@@ -63,6 +65,7 @@ class RuntimeTools:
                 "context": {"type": "string", "description": "传递给所有 Worker 的背景信息，如事件详情、已查到的设施列表等"},
             }, "required": ["tasks"]},
             handler=lambda args: self._dispatch_workers_handler(args),
+            usage_prompt="仅用于可并行、相互独立的只读子任务。tasks 必须自包含必要 ID 和条件；context 应放入共享背景。不要派发需要用户确认、写入或依赖主会话隐含历史的任务。",
             category="action",
             policy=ToolPolicy(
                 read_only=False,

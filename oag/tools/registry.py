@@ -18,6 +18,7 @@ class ToolPolicy:
     worker_allowed: bool = True
     idempotent: bool = True
     destructive: bool = False
+    timeout_seconds: float | None = 30.0
 
 
 @dataclass
@@ -26,6 +27,7 @@ class ToolDef:
     description: str
     parameters: dict
     handler: Callable[[dict], str]
+    usage_prompt: str = ""
     category: str = "query"
     is_read_only: bool = True
     requires_confirmation: bool = False
@@ -51,9 +53,14 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: dict[str, ToolDef] = {}
+        self._version = 0
+        self._built_tools_cache: list[dict] | None = None
+        self._built_tools_version = -1
 
     def register(self, tool: ToolDef):
         self._tools[tool.name] = tool
+        self._version += 1
+        self._built_tools_cache = None
 
     def get(self, name: str) -> ToolDef | None:
         return self._tools.get(name)
@@ -61,15 +68,36 @@ class ToolRegistry:
     def has(self, name: str) -> bool:
         return name in self._tools
 
+    @property
+    def version(self) -> int:
+        return self._version
+
     def build_tools(self) -> list[dict]:
-        return [
+        if (
+            self._built_tools_cache is not None
+            and self._built_tools_version == self._version
+        ):
+            return self._built_tools_cache
+
+        self._built_tools_cache = [
             {
                 "type": "function",
                 "function": {
                     "name": t.name,
-                    "description": t.description,
+                    "description": self._build_description(t),
                     "parameters": t.parameters,
                 },
             }
             for t in self._tools.values()
         ]
+        self._built_tools_version = self._version
+        return self._built_tools_cache
+
+    def _build_description(self, tool: ToolDef) -> str:
+        description = tool.description.strip()
+        usage_prompt = tool.usage_prompt.strip()
+        if not usage_prompt:
+            return description
+        if not description:
+            return usage_prompt
+        return f"{description}\n\n使用说明:\n{usage_prompt}"

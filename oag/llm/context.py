@@ -80,11 +80,12 @@ class ContextManager:
         if len(messages) <= 4:
             return messages, False
 
-        recent_count = min(6, len(messages) - 1)
         system_msg = messages[0] if messages[0].get("role") == "system" else None
         start = 1 if system_msg else 0
-        old_messages = messages[start:-recent_count]
-        recent_messages = messages[-recent_count:]
+        split_index = max(start, len(messages) - min(6, len(messages) - 1))
+        split_index = self._adjust_split_for_tool_pairs(messages, split_index, start)
+        old_messages = messages[start:split_index]
+        recent_messages = messages[split_index:]
 
         if not old_messages:
             return messages, False
@@ -106,6 +107,36 @@ class ContextManager:
 
         return compacted, True
 
+    def force_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
+        messages = self._micro_compact(messages)
+        if len(messages) <= 4:
+            return messages, False
+
+        system_msg = messages[0] if messages[0].get("role") == "system" else None
+        start = 1 if system_msg else 0
+        split_index = max(start, len(messages) - min(4, len(messages) - 1))
+        split_index = self._adjust_split_for_tool_pairs(messages, split_index, start)
+
+        old_messages = messages[start:split_index]
+        recent_messages = messages[split_index:]
+        if not old_messages:
+            return messages, False
+
+        summary = self._summarize(old_messages)
+        compacted = []
+        if system_msg:
+            compacted.append(system_msg)
+        compacted.append({
+            "role": "user",
+            "content": f"[前置对话摘要]\n{summary}",
+        })
+        compacted.append({
+            "role": "assistant",
+            "content": "好的，我已了解前面的对话内容。请继续。",
+        })
+        compacted.extend(recent_messages)
+        return compacted, True
+
     def _micro_compact(self, messages: list[dict]) -> list[str]:
         tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
         protect = set(tool_indices[-3:]) if len(tool_indices) >= 3 else set(tool_indices)
@@ -120,6 +151,41 @@ class ContextManager:
                     "content": content[:200] + "\n[... 结果已压缩]",
                 }
         return messages
+
+    def _adjust_split_for_tool_pairs(self, messages: list[dict],
+                                     split_index: int,
+                                     min_index: int) -> int:
+        needed_ids = {
+            m.get("tool_call_id")
+            for m in messages[split_index:]
+            if m.get("role") == "tool" and m.get("tool_call_id")
+        }
+        if not needed_ids:
+            return split_index
+
+        present_ids = self._assistant_tool_call_ids(messages[split_index:])
+        missing_ids = needed_ids - present_ids
+        adjusted = split_index
+
+        for i in range(split_index - 1, min_index - 1, -1):
+            if not missing_ids:
+                break
+            ids = self._assistant_tool_call_ids([messages[i]])
+            if ids & missing_ids:
+                adjusted = i
+                missing_ids -= ids
+
+        return adjusted
+
+    def _assistant_tool_call_ids(self, messages: list[dict]) -> set[str]:
+        ids: set[str] = set()
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls", []) or []:
+                if isinstance(tc, dict) and tc.get("id"):
+                    ids.add(tc["id"])
+        return ids
 
     def _summarize(self, messages: list[dict]) -> str:
         history_parts = []

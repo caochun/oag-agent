@@ -75,6 +75,7 @@ class TemporalConstraint(BaseModel):
 class FunctionDef(BaseModel):
     description: str = ""
     summary: str = ""
+    usage_prompt: str = ""
     group: str = ""
     depends_on: list[str] = []
     hint: str = ""

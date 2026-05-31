@@ -18,12 +18,31 @@ class OntologyPromptBuilder:
         self.registry = registry
 
     def build_system_prompt(self, domain_context: str = "") -> str:
+        return "\n\n".join(self.build_static_sections(domain_context))
+
+    def build_static_sections(self, domain_context: str = "") -> list[str]:
+        sections = [
+            self.build_base_system_prompt(),
+            self.build_ontology_summary(),
+            self.build_tool_usage_rules(),
+        ]
+        if domain_context:
+            sections.append(domain_context.strip())
+        return [section for section in sections if section.strip()]
+
+    def build_system_sections(self, domain_context: str = "") -> list[str]:
+        return self.build_static_sections(domain_context)
+
+    def build_base_system_prompt(self) -> str:
         parts = []
         parts.append(f"你是 {self.ontology.name} 领域的智能助手。")
         if self.ontology.description:
             parts.append(f"\n## 领域说明\n{self.ontology.description}")
+        return "\n".join(parts)
 
-        parts.append("\n## 可用对象")
+    def build_ontology_summary(self) -> str:
+        parts = []
+        parts.append("## 可用对象")
         for name, obj in self.ontology.objects.items():
             kind_label = f" [{obj.kind}]" if obj.kind != "entity" else ""
             line = (obj.summary or obj.description or "").strip().split("\n")[0]
@@ -84,13 +103,17 @@ class OntologyPromptBuilder:
         if fn_lines:
             parts.append("\n## 可用函数")
             parts.extend(fn_lines)
-            parts.append("(函数、对象的完整规则和约束已在本提示后文全量提供)")
+            parts.append("(这里只提供摘要。需要函数、对象或规则完整定义时，调用 inspect。)")
 
+        return "\n".join(parts)
+
+    def build_tool_usage_rules(self) -> str:
+        parts = []
         parts.append("\n## 工具使用规则")
         parts.append("- 查询数据: 使用 query/count/query_links")
         parts.append("- 统计分析: 使用 describe/pivot/distribution")
         parts.append("- 应用规则: 使用 apply_rule（确定性，不要自己推理）")
-        parts.append("- 查看详情: 使用 inspect 获取函数/对象的完整定义")
+        parts.append("- 查看详情: 使用 inspect 获取函数/对象/规则的完整定义；不要假设摘要里没有出现的字段或约束")
         parts.append("- 业务操作: 调用注册的业务函数")
         parts.append("- 数据变更: 使用 mutate 创建/更新/删除对象实例（需用户确认）")
         parts.append("- 全文搜索: 使用 search 跨类型关键词搜索")
@@ -104,9 +127,6 @@ class OntologyPromptBuilder:
         parts.append("- 当存在多个可行方案时，必须使用 ask_user 让用户选择，不要自行决定")
         parts.append("- 当任务涉及优先级或策略权衡时，使用 ask_user 确认用户偏好后再执行")
         parts.append("- 当关键参数有多种合理取值时，使用 ask_user 让用户确认")
-
-        if domain_context:
-            parts.append(f"\n{domain_context}")
 
         return "\n".join(parts)
 
@@ -136,6 +156,8 @@ class OntologyPromptBuilder:
                 lines.append(f"摘要: {fdef.summary.strip()}")
             if fdef.description:
                 lines.append(f"说明: {fdef.description.strip()}")
+            if fdef.usage_prompt:
+                lines.append(f"使用说明: {fdef.usage_prompt.strip()}")
             if fdef.hint:
                 lines.append(f"规则: {fdef.hint.strip()}")
             if fdef.params:

@@ -46,6 +46,18 @@ class OntologyRuntime:
     def build_system_prompt(self, domain_context: str = "") -> str:
         return self._prompt_builder.build_system_prompt(domain_context=domain_context)
 
+    def build_static_sections(self, domain_context: str = "") -> list[str]:
+        return self._prompt_builder.build_static_sections(domain_context=domain_context)
+
+    def build_system_sections(self, domain_context: str = "") -> list[str]:
+        return self._prompt_builder.build_system_sections(domain_context=domain_context)
+
+    def build_base_system_prompt(self) -> str:
+        return self._prompt_builder.build_base_system_prompt()
+
+    def build_ontology_summary(self) -> str:
+        return self._prompt_builder.build_ontology_summary()
+
     def build_full_context(self) -> str:
         return self._prompt_builder.build_full_context()
 

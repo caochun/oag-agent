@@ -10,21 +10,22 @@ import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Generator
 
-from openai import OpenAI
+from openai import APIStatusError, OpenAI
 
 from ..runtime.events import (
     CompactEvent, ConfirmationEvent, DebugEvent, Event, QuestionEvent,
     ReasoningEvent, TextEvent, ToolCallEvent,
 )
 from ..llm.retry import call_llm_with_retry
-from ..runtime import RunState
-from .tool_executor import ToolExecutor
+from ..runtime import RunState, ToolUseContext
+from ..tools.pipeline import ToolResult
+from ..runtime.message_sanitizer import sanitize_messages
 
 if TYPE_CHECKING:
     from ..harness import Harness
 
 
-PendingConfirmationHandler = Callable[[str, str, dict, str, list[dict]], None]
+PendingConfirmationHandler = Callable[[str, str, dict, str, list[dict], RunState, list[dict] | None], None]
 MAX_REASONING_CHARS = 5000
 
 
@@ -34,7 +35,6 @@ class QueryLoop:
         self.harness = harness
         self.client = llm_client
         self.model = model
-        self.tool_executor = ToolExecutor(harness)
         self.on_pending_confirmation = on_pending_confirmation
 
     def run(self, state: RunState) -> Generator[Event, None, None]:
@@ -43,6 +43,12 @@ class QueryLoop:
         while True:
             # 一次循环对应一个模型回合，以及该回合触发的工具执行结果。
             state.turn_count += 1
+            sanitized_messages, sanitized = sanitize_messages(
+                state.messages,
+                repair_missing_tool_results=False,
+            )
+            if sanitized:
+                state.messages[:] = sanitized_messages
             messages = state.messages
             self.harness.trace.record(
                 "agent_turn_start",
@@ -58,7 +64,9 @@ class QueryLoop:
                     turn_count=state.turn_count,
                     reason="max_turns_reached",
                 )
-                yield DebugEvent(stage="info", content=f"max_turns ({self.harness.config.max_turns}) reached")
+                content = f"已达到最大轮次限制（{self.harness.config.max_turns}），本轮已停止。"
+                messages.append({"role": "assistant", "content": content})
+                yield TextEvent(content=content)
                 break
 
             if state.turn_count > 1 and state.turn_count % 5 == 0:
@@ -67,16 +75,34 @@ class QueryLoop:
                 if compacted:
                     yield CompactEvent()
 
+            yield from self._compact_before_request(state)
+            messages = state.messages
             yield self._build_request_debug_event(state)
 
-            response = call_llm_with_retry(
-                self.client,
-                model=self.model,
-                messages=messages,
-                tools=tools if tools else None,
-                temperature=0.1,
-                stream=True,
-            )
+            try:
+                response = call_llm_with_retry(
+                    self.client,
+                    model=self.model,
+                    messages=messages,
+                    tools=tools if tools else None,
+                    temperature=0.1,
+                    stream=True,
+                )
+            except Exception as exc:
+                if not self._is_context_overflow_error(exc):
+                    raise
+                compacted = yield from self._compact_after_overflow(state)
+                if not compacted:
+                    raise
+                messages = state.messages
+                response = call_llm_with_retry(
+                    self.client,
+                    model=self.model,
+                    messages=messages,
+                    tools=tools if tools else None,
+                    temperature=0.1,
+                    stream=True,
+                )
             msg = yield from self._consume_llm_response(response)
 
             if not msg.tool_calls:
@@ -105,15 +131,20 @@ class QueryLoop:
                 ],
             })
 
-            tool_calls_parsed = [
-                (tc, json.loads(tc.function.arguments)) for tc in msg.tool_calls
-            ]
-            results_ordered = self.tool_executor.execute_tool_calls(tool_calls_parsed, state)
-
-            should_stop = False
-            for tc, args, result in results_ordered:
+            for index, tc in enumerate(msg.tool_calls):
+                args, parse_error = self._parse_tool_args(tc.function.arguments)
+                result = parse_error or self.harness.execute_tool(
+                    tc.function.name,
+                    args,
+                    context=ToolUseContext(
+                        session_id=state.session_id,
+                        messages=state.messages,
+                        confirmed=False,
+                    ),
+                )
                 if result.needs_confirmation:
                     # 暂停当前循环并保存现场；用户响应后由 ConfirmationFlow 继续。
+                    skipped_tool_calls = self._build_skipped_tool_calls(msg.tool_calls[index + 1:])
                     self.harness.trace.record(
                         "agent_transition",
                         session_id=state.session_id,
@@ -127,6 +158,8 @@ class QueryLoop:
                         args,
                         tc.id,
                         messages,
+                        state,
+                        skipped_tool_calls,
                     )
                     if tc.function.name == "ask_user":
                         yield QuestionEvent(
@@ -140,8 +173,7 @@ class QueryLoop:
                             args=args,
                             reason=result.block_reason,
                         )
-                    should_stop = True
-                    break
+                    return
 
                 preview_len = 5000 if tc.function.name == "dispatch_workers" else 200
                 yield ToolCallEvent(
@@ -161,9 +193,6 @@ class QueryLoop:
                         "role": "user",
                         "content": f"[系统提示] 工具 {tc.function.name} 被阻止: {result.block_reason}",
                     })
-
-            if should_stop:
-                return
 
             state.stop_hook_active = False
             state.transition_reason = "next_turn"
@@ -308,3 +337,71 @@ class QueryLoop:
             extra = getattr(msg, "model_extra", None) or {}
             reasoning = extra.get("reasoning_content")
         return str(reasoning) if reasoning else ""
+
+    def _compact_before_request(self, state: RunState) -> Generator[Event, None, None]:
+        messages, compacted = self.harness.maybe_compact(state.messages)
+        state.messages = messages
+        if compacted:
+            yield CompactEvent()
+
+    def _compact_after_overflow(self, state: RunState) -> Generator[Event, None, bool]:
+        before = state.messages
+        messages, compacted = self.harness.force_compact(before)
+        state.messages = messages
+        if compacted:
+            yield CompactEvent()
+            return True
+        return False
+
+    def _is_context_overflow_error(self, exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(exc, APIStatusError) and status_code not in (400, 413):
+            return False
+
+        code = ""
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            err = body.get("error", body)
+            if isinstance(err, dict):
+                code = str(err.get("code") or err.get("type") or "")
+
+        text = f"{code} {exc}".lower()
+        return any(marker in text for marker in (
+            "context_length_exceeded",
+            "maximum context length",
+            "context length",
+            "prompt too long",
+            "too many tokens",
+            "request too large",
+        ))
+
+    def _parse_tool_args(self, raw_args: str) -> tuple[dict, ToolResult | None]:
+        try:
+            parsed = json.loads(raw_args or "{}")
+        except json.JSONDecodeError as exc:
+            reason = f"工具参数不是合法 JSON: {exc.msg}"
+            return {}, ToolResult(
+                content=json.dumps({"error": reason}, ensure_ascii=False),
+                blocked=True,
+                block_reason=reason,
+            )
+        if not isinstance(parsed, dict):
+            reason = "工具参数必须是 JSON object"
+            return {}, ToolResult(
+                content=json.dumps({"error": reason}, ensure_ascii=False),
+                blocked=True,
+                block_reason=reason,
+            )
+        return parsed, None
+
+    def _build_skipped_tool_calls(self, tool_calls: list) -> list[dict]:
+        return [
+            {
+                "tool_call_id": tc.id,
+                "content": json.dumps({
+                    "skipped": True,
+                    "reason": "前一个工具调用需要用户确认，本调用未执行",
+                }, ensure_ascii=False),
+            }
+            for tc in tool_calls
+        ]

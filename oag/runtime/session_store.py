@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from .message_sanitizer import sanitize_messages
+
 
 class SessionStore:
     def __init__(self, db_path: str):
@@ -27,10 +29,14 @@ class SessionStore:
             messages = json.loads(row[0])
         else:
             messages = []
+        messages, changed = sanitize_messages(messages)
+        if changed:
+            self.save(session_id, messages)
         self._cache[session_id] = messages
         return messages
 
     def save(self, session_id: str, messages: list[dict]):
+        messages, _ = sanitize_messages(messages, repair_missing_tool_results=False)
         self._cache[session_id] = messages
         self.conn.execute(
             "INSERT OR REPLACE INTO chat_history (session_id, messages, updated_at) "

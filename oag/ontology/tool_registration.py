@@ -181,6 +181,7 @@ class OntologyToolRegistrar:
                 description=(fdef.summary or fdef.description or "").strip(),
                 parameters={"type": "object", "properties": props, "required": required},
                 handler=lambda args, _n=fn_name: data.execute(_n, args),
+                usage_prompt=fdef.usage_prompt or fdef.hint,
                 category="action" if has_writes else "query",
                 is_read_only=not has_writes,
                 requires_confirmation=has_writes or is_business,
