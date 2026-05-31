@@ -1,3 +1,9 @@
+"""本体子系统导出。
+
+ontology 包承载领域真相：YAML schema、对象存储、函数注册、规则执行、
+prompt 构建、运行时验证、显式 inspect、工作流辅助和工具注册。
+"""
+
 __all__ = [
     "DataExecutor",
     "FunctionRegistry",

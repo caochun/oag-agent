@@ -1,3 +1,9 @@
+"""单个模型回合内的工具调用执行器。
+
+ToolExecutor 把模型一次返回的多个 tool call 划分成可并发和不可并发的批次，
+并统一委托 Harness.execute_tool 做真正的策略约束和执行。
+"""
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -39,6 +45,7 @@ class ToolExecutor:
         for tc, args in tool_calls_parsed:
             tool = self.harness.tools.get(tc.function.name)
             concurrency_safe = bool(tool and tool.policy and tool.policy.concurrency_safe)
+            # 只有相邻的并发安全工具会被合并；写操作/确认/业务动作自然形成顺序屏障。
             if concurrency_safe and batches and self.batch_is_concurrency_safe(batches[-1]):
                 batches[-1].append((tc, args))
             else:

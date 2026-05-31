@@ -1,3 +1,9 @@
+"""LLM API 重试封装。
+
+集中处理 OpenAI API 的临时性错误重试、指数退避和 jitter，使主循环、
+worker 和上下文摘要调用保持一致的失败处理方式。
+"""
+
 from __future__ import annotations
 
 import logging

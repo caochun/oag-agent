@@ -1,3 +1,9 @@
+"""对话上下文管理。
+
+本模块负责估算消息长度、截断过大的工具结果，并在上下文过长时压缩历史。
+压缩时会尽量保留 system prompt 和最近若干轮，旧消息才会被摘要。
+"""
+
 from __future__ import annotations
 
 import json
@@ -58,6 +64,7 @@ class ContextManager:
     def maybe_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
         token_count = count_messages_tokens(messages)
 
+        # 先尝试本地轻量压缩，避免不必要的 LLM 摘要调用。
         if token_count >= self.micro_threshold and token_count < self.compact_threshold:
             messages = self._micro_compact(messages)
             if count_messages_tokens(messages) < self.micro_threshold:
@@ -82,6 +89,7 @@ class ContextManager:
         if not old_messages:
             return messages, False
 
+        # system prompt 是长期约束，压缩时只摘要旧对话，不改写 system prompt。
         summary = self._summarize(old_messages)
         compacted = []
         if system_msg:

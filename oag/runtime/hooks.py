@@ -1,3 +1,9 @@
+"""运行时 hook 系统。
+
+Hooks 用于在工具调用前后、最终回答后执行横切策略。默认 hook 覆盖写操作
+确认、审计日志、业务结果检查和最终回答完整性检查。
+"""
+
 from __future__ import annotations
 
 import json
@@ -87,6 +93,7 @@ class AuditLog:
 def write_confirmation_hook(context: dict) -> HookResult:
     tool_meta = context.get("tool_meta")
     if tool_meta and tool_meta.requires_confirmation:
+        # 暂停而不是直接执行；用户确认后 ConfirmationFlow 会以 confirmed=True 恢复。
         return HookResult(
             action="pause",
             reason=f"函数 {context['tool_name']} 将修改数据，请确认执行",

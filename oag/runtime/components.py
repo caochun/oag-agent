@@ -1,3 +1,9 @@
+"""Harness 组件装配入口。
+
+这里是在线执行的 composition root：创建 hooks/audit、OntologyRuntime、
+DataExecutor、ToolRegistry、ToolExecutionPipeline、RuntimeTools 和 TraceRecorder。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -62,6 +68,7 @@ def build_harness_components(
     tools = ToolRegistry()
     cache: dict[str, ToolResult] = {}
     trace = TraceRecorder()
+    # 工具 handler 尽量保持简单；统一的策略、校验、缓存、审计都在 pipeline 中完成。
     tool_pipeline = ToolExecutionPipeline(
         tools=tools,
         ontology_runtime=ont,
@@ -69,7 +76,6 @@ def build_harness_components(
         audit=audit,
         cache=cache,
         trace=trace,
-        progressive_context_enabled=lambda: config.enable_progressive_context,
         set_current_messages=set_current_messages,
     )
     runtime_tools = RuntimeTools(

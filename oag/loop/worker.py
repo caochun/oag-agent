@@ -1,3 +1,9 @@
+"""并行 Worker 智能体。
+
+Worker 用于执行彼此独立的子任务：它只能看到父任务显式传入的 context，并且
+会使用经过过滤的工具列表。所有工具调用仍然经过 Harness 策略约束。
+"""
+
 from __future__ import annotations
 
 import json

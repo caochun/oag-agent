@@ -95,34 +95,16 @@ def make_tool_call(name: str, tool_id: str = "tool_1") -> SimpleNamespace:
     )
 
 
-def test_default_prompt_uses_full_context_without_progressive_injection():
+def test_prompt_uses_full_context():
     harness = make_harness()
 
     prompt = harness.build_system_prompt()
-    result = harness.execute_tool("lookup_asset", {"asset_id": "A1"})
 
-    assert harness.config.enable_progressive_context is False
     assert "## 函数完整定义" in prompt
     assert "### 函数: lookup_asset" in prompt
     assert "## 对象完整定义" in prompt
     assert "### 对象: Asset" in prompt
     assert "首次调用函数时系统会自动注入" not in prompt
-    assert result.context_note == ""
-
-
-def test_progressive_context_can_still_be_enabled_explicitly():
-    harness = make_harness(HarnessConfig(
-        enable_write_confirmation=False,
-        enable_progressive_context=True,
-    ))
-
-    prompt = harness.build_system_prompt()
-    result = harness.execute_tool("lookup_asset", {"asset_id": "A1"})
-
-    assert "## 函数完整定义" not in prompt
-    assert "首次调用函数时系统会自动注入" in prompt
-    assert "Lookup asset details" in result.context_note
-    assert "Asset" in result.context_note
 
 
 def test_worker_context_blocks_confirmation_and_non_worker_tools():

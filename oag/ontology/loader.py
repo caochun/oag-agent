@@ -1,3 +1,9 @@
+"""领域目录加载器。
+
+load_domain 读取 ontology.yaml，初始化本体 Store，导入可选的 functions
+模块，并把 YAML 中声明的函数定义绑定到 Python 实现上。
+"""
+
 from __future__ import annotations
 
 import importlib.util

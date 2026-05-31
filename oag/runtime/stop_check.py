@@ -1,3 +1,5 @@
+"""默认最终回答完整性检查 hook。"""
+
 from __future__ import annotations
 
 from .hooks import HookResult

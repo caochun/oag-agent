@@ -1,3 +1,9 @@
+"""领域函数注册表。
+
+FunctionRegistry 负责把 ontology 中的 FunctionDef 元数据绑定到 Python
+callable，并在调用前检查声明的依赖关系。
+"""
+
 from __future__ import annotations
 
 import json

@@ -1,3 +1,9 @@
+"""运行时内置工具。
+
+这些不是领域函数，而是 agent 控制原语：总结进展、向用户提问、派发独立
+worker 子任务。
+"""
+
 from __future__ import annotations
 
 import json

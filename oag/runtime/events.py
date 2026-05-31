@@ -1,3 +1,9 @@
+"""流式事件类型。
+
+Agent.chat_stream 产出这些 dataclass 事件；chat_stream_sse 会把它们转换成
+web 前端更容易消费的 dict。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

@@ -1,3 +1,9 @@
+"""工具子系统导出。
+
+tools 包包含工具元数据/策略定义、统一执行管线，以及 ask_user、
+summarize_progress、dispatch_workers 等运行时内置工具。
+"""
+
 __all__ = [
     "RuntimeTools",
     "ToolDef",

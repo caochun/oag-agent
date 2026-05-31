@@ -1,3 +1,9 @@
+"""本体 YAML schema。
+
+这里的 Pydantic 模型定义对象、关系、函数、规则和工作流的配置契约，
+并提供业务 ID 字段、表名、适用规则等常用派生信息。
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -149,4 +155,3 @@ class Ontology(BaseModel):
             k: v for k, v in self.rules.items()
             if object_type in v.applies_to
         }
-

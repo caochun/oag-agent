@@ -1,3 +1,5 @@
+"""SQLite 会话历史存储。"""
+
 from __future__ import annotations
 
 import json

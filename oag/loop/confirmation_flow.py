@@ -1,3 +1,9 @@
+"""用户确认后的继续执行流程。
+
+当工具调用因为写操作确认或 ask_user 问题暂停时，本模块负责把用户的批准、
+拒绝或回答写回消息列表，然后把控制权交还给正常 QueryLoop。
+"""
+
 from __future__ import annotations
 
 import json
@@ -64,12 +70,6 @@ class ConfirmationFlow:
             args=pending.args,
             result=result.content[:200],
         )
-
-        if result.context_note:
-            messages.append({
-                "role": "system",
-                "content": f"[函数 {pending.tool_name} 的详细规则和约束]\n{result.context_note}",
-            })
 
         messages.append({
             "role": "tool",

@@ -1,7 +1,13 @@
+"""面向调用方的会话级 Agent API。
+
+Agent 负责聊天会话、待确认操作、流式/SSE 输出和历史持久化；具体的 LLM
+回合循环交给 QueryLoop，工具执行和策略约束交给 Harness。
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Generator
+from typing import Generator
 
 from openai import OpenAI
 
@@ -68,16 +74,6 @@ class Agent:
 
     def _run_loop(self, state: RunState) -> Generator[Event, None, None]:
         yield from self.query_loop.run(state)
-
-    def _execute_tool_calls(self, tool_calls_parsed: list[tuple[Any, dict]],
-                            state: RunState) -> list[tuple[Any, dict, Any]]:
-        return self.query_loop.tool_executor.execute_tool_calls(tool_calls_parsed, state)
-
-    def _partition_tool_calls(self, tool_calls_parsed: list[tuple[Any, dict]]) -> list[list[tuple[Any, dict]]]:
-        return self.query_loop.tool_executor.partition_tool_calls(tool_calls_parsed)
-
-    def _batch_is_concurrency_safe(self, batch: list[tuple[Any, dict]]) -> bool:
-        return self.query_loop.tool_executor.batch_is_concurrency_safe(batch)
 
     def _set_pending_confirmation(self, session_id: str, tool_name: str, args: dict,
                                   tool_call_id: str, messages: list[dict]):

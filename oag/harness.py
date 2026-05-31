@@ -1,3 +1,9 @@
+"""运行时 Harness 门面。
+
+Harness 是模型外侧的执行边界：构建 prompt 和工具、通过工具管线执行调用、
+持有 hooks/audit/trace，并向对话循环提供压缩和最终回答检查能力。
+"""
+
 from __future__ import annotations
 
 import logging
@@ -87,19 +93,10 @@ class Harness:
         return self.tools.build_tools()
 
     def build_system_prompt(self, domain_context: str = "") -> str:
-        prompt = self.ont.build_system_prompt(
-            domain_context,
-            progressive_context=self.config.enable_progressive_context,
-        )
-        if not self.config.enable_progressive_context:
-            prompt += "\n\n" + self.ont.build_full_context()
-        return prompt
+        return self.ont.build_system_prompt(domain_context) + "\n\n" + self.ont.build_full_context()
 
     def maybe_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
-        messages, compacted = self.context_mgr.maybe_compact(messages)
-        if compacted and self.config.enable_progressive_context:
-            self.ont.reset_context_shown()
-        return messages, compacted
+        return self.context_mgr.maybe_compact(messages)
 
     def run_stop_check(self, user_question: str, messages: list[dict]) -> str | None:
         result = self.hooks.fire("query_complete", {

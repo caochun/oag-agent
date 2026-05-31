@@ -1,3 +1,9 @@
+"""基于 SQLite 的本体对象存储。
+
+Store 是对象实例的底层读写层：根据 ontology 创建表、加载数据、执行查询、
+关系查询、搜索和基础写入。业务级校验放在 OntologyValidator，而不是这里。
+"""
+
 from __future__ import annotations
 
 import json
@@ -103,6 +109,7 @@ class Store:
         if filters:
             clauses = []
             for k, v in filters.items():
+                # 过滤操作符用 field__op 表达，例如 capacity__gte。
                 col = k.split("__")[0] if "__" in k else k
                 if col not in valid_cols:
                     continue
@@ -190,6 +197,7 @@ class Store:
         obj_def = self.ontology.objects.get(object_type)
         if not obj_def:
             raise ValueError(f"未知对象类型: {object_type}")
+        # 未知字段在底层忽略；面向用户的字段错误由 OntologyValidator 提前返回。
         valid_cols = set(obj_def.properties.keys())
         row = {k: v for k, v in data.items() if k in valid_cols}
         if not row:

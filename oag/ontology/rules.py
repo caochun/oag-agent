@@ -1,3 +1,9 @@
+"""确定性本体规则引擎。
+
+规则表达那些不应该交给 LLM 自行推理的领域判定。本模块编译规则条件，
+并通过 apply_rule/apply_rule_batch 工具暴露单条或批量执行能力。
+"""
+
 from __future__ import annotations
 
 import json

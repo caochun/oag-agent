@@ -1,11 +1,16 @@
+"""工具执行管线。
+
+这是每次工具调用的中心策略闸门：worker 权限、mutate 校验、hooks/确认、
+只读缓存、本体约束、结果截断、审计 hook 和 trace 都在这里统一处理。
+"""
+
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol
 
 from ..llm.context import truncate_tool_result
-from ..ontology.runtime import OntologyRuntime
 from ..runtime import ToolUseContext, TraceRecorder
 from ..runtime.hooks import AuditLog, HookRegistry, HookResult
 from .registry import ToolDef, ToolRegistry
@@ -19,18 +24,21 @@ class ToolResult:
     blocked: bool = False
     block_reason: str = ""
     needs_confirmation: bool = False
-    context_note: str = ""
+
+
+class ToolPolicyRuntime(Protocol):
+    def validate_mutate(self, args: dict) -> str | None: ...
+    def check_constraints(self, tool_name: str, args: dict) -> str | None: ...
 
 
 class ToolExecutionPipeline:
     def __init__(self, *,
                  tools: ToolRegistry,
-                 ontology_runtime: OntologyRuntime,
+                 ontology_runtime: ToolPolicyRuntime,
                  hooks: HookRegistry,
                  audit: AuditLog,
                  cache: dict[str, ToolResult],
                  trace: TraceRecorder,
-                 progressive_context_enabled: Callable[[], bool],
                  set_current_messages: Callable[[list[dict] | None], None]):
         self.tools = tools
         self.ont = ontology_runtime
@@ -38,7 +46,6 @@ class ToolExecutionPipeline:
         self.audit = audit
         self.cache = cache
         self.trace = trace
-        self.progressive_context_enabled = progressive_context_enabled
         self.set_current_messages = set_current_messages
 
     def execute(self, tool_name: str, args: dict, context: ToolUseContext) -> ToolResult:
@@ -52,6 +59,7 @@ class ToolExecutionPipeline:
             )
             return ToolResult(content=json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False))
 
+        # 执行顺序很重要：先做便宜的策略/校验，再触发 hooks，最后才执行 handler。
         self.trace.record(
             "tool_start",
             session_id=context.session_id,
@@ -159,6 +167,7 @@ class ToolExecutionPipeline:
         if not (tool.requires_confirmation and not context.confirmed and tool_name == "ask_user"):
             return None
 
+        # ask_user 被建模成“需要确认的工具暂停”，这样 UI 能统一渲染问题并回填答案。
         raw_result = tool.handler(args)
         return ToolResult(
             content=raw_result,
@@ -190,7 +199,6 @@ class ToolExecutionPipeline:
             self.set_current_messages(context.messages)
 
         raw_result = tool.handler(args)
-        context_note = self._build_progressive_context_note(tool_name, raw_result)
         truncated_result = truncate_tool_result(raw_result, tool.max_result_chars)
         was_truncated = len(truncated_result) < len(raw_result)
 
@@ -203,21 +211,12 @@ class ToolExecutionPipeline:
             content=truncated_result,
             raw_content=raw_result,
             truncated=was_truncated,
-            context_note=context_note,
         )
 
     def _store_cache_result(self, tool_name: str, args: dict, tool: ToolDef,
                             result: ToolResult):
         if tool.is_read_only:
             self.cache[self._cache_key(tool_name, args)] = result
-
-    def _build_progressive_context_note(self, tool_name: str, raw_result: str) -> str:
-        if not self.progressive_context_enabled():
-            return ""
-        fn_context = self.ont.build_context_for_tool(tool_name) or ""
-        result_context = self.ont.build_context_from_result(raw_result) or ""
-        context_parts = [p for p in [fn_context, result_context] if p]
-        return "\n\n".join(context_parts)
 
     def _run_post_tool_hooks(self, tool_name: str, args: dict, tool: ToolDef,
                              raw_result: str, context: ToolUseContext) -> HookResult:

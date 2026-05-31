@@ -1,3 +1,9 @@
+"""主 LLM 回合循环。
+
+QueryLoop 负责把消息和工具发给模型、记录调试事件、执行模型请求的工具、
+处理确认暂停，并在最终回答前运行 stop check。它不直接实现工具策略。
+"""
+
 from __future__ import annotations
 
 import json
@@ -33,6 +39,7 @@ class QueryLoop:
         tools = self.harness.build_tools()
 
         while True:
+            # 一次循环对应一个模型回合，以及该回合触发的工具执行结果。
             state.turn_count += 1
             messages = state.messages
             self.harness.trace.record(
@@ -75,6 +82,8 @@ class QueryLoop:
                 yield from self._handle_final_response(state, msg.content or "")
                 return
 
+            # OpenAI tool protocol 要求先保存 assistant 的 tool_calls envelope，
+            # 再追加每个 tool_call_id 对应的 tool 消息。
             messages.append({
                 "role": "assistant",
                 "content": msg.content or "",
@@ -99,6 +108,7 @@ class QueryLoop:
             should_stop = False
             for tc, args, result in results_ordered:
                 if result.needs_confirmation:
+                    # 暂停当前循环并保存现场；用户响应后由 ConfirmationFlow 继续。
                     self.harness.trace.record(
                         "agent_transition",
                         session_id=state.session_id,
@@ -134,12 +144,6 @@ class QueryLoop:
                     args=args,
                     result=result.content[:preview_len],
                 )
-
-                if result.context_note:
-                    messages.append({
-                        "role": "system",
-                        "content": f"[函数 {tc.function.name} 的详细规则和约束]\n{result.context_note}",
-                    })
 
                 messages.append({
                     "role": "tool",

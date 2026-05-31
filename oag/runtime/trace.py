@@ -1,3 +1,5 @@
+"""内存执行轨迹记录器。"""
+
 from __future__ import annotations
 
 import time

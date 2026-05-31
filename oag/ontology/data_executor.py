@@ -1,3 +1,10 @@
+"""本体数据工具和领域函数执行器。
+
+DataExecutor 把工具名映射到对象查询、统计分析、全文搜索、mutate 操作或
+领域 Python 函数。它返回 JSON 字符串，因为 ToolDef handler 会直接作为
+模型可见的工具结果。
+"""
+
 from __future__ import annotations
 
 import json
@@ -17,6 +24,7 @@ class DataExecutor:
 
     def execute(self, name: str, args: dict) -> str:
         try:
+            # 内置数据工具在这里处理；未匹配时再尝试调用领域函数注册表。
             if name == "query":
                 rows = self.store.query(
                     args["object_type"], args.get("filters"),
@@ -99,6 +107,7 @@ class DataExecutor:
         rows = self.store.query(object_type)
         if not rows:
             return {"error": f"{object_type} has no data"}
+        # Pandas 只用于对查询结果做小规模内存分析，不是权威数据源。
         df = pd.DataFrame(rows).drop(columns=["_id"], errors="ignore")
 
         if column:

@@ -1,3 +1,9 @@
+"""工具元数据注册表。
+
+ToolDef 同时描述模型可见的函数 schema 和 harness 策略；ToolRegistry 保存
+这些定义，并转换为 OpenAI chat.completions 可用的 tools 规格。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
