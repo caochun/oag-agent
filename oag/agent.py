@@ -5,7 +5,7 @@ from typing import Any, Generator
 
 from openai import OpenAI
 
-from .events import (
+from .runtime.events import (
     Event, TextEvent, event_to_dict,
 )
 from .harness import Harness

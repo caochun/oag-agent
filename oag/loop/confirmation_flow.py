@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Callable, Generator
 
-from ..events import Event, TextEvent, ToolCallEvent
 from ..runtime import PendingConfirmation, RunState, ToolUseContext
+from ..runtime.events import Event, TextEvent, ToolCallEvent
 
 if TYPE_CHECKING:
     from ..harness import Harness

@@ -4,10 +4,10 @@ import json
 from dataclasses import dataclass
 from typing import Callable
 
-from ..context import truncate_tool_result
-from ..hooks import AuditLog, HookRegistry, HookResult
+from ..llm.context import truncate_tool_result
 from ..ontology.runtime import OntologyRuntime
 from ..runtime import ToolUseContext, TraceRecorder
+from ..runtime.hooks import AuditLog, HookRegistry, HookResult
 from .registry import ToolDef, ToolRegistry
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Callable
 
-from ..context import ContextManager
+from ..llm.context import ContextManager
 from .registry import ToolDef, ToolPolicy, ToolRegistry
 
 

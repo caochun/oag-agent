@@ -6,11 +6,11 @@ from typing import Any, TYPE_CHECKING
 
 from openai import OpenAI
 
-from .retry import call_llm_with_retry
-from .runtime import ToolUseContext
+from ..llm.retry import call_llm_with_retry
+from ..runtime import ToolUseContext
 
 if TYPE_CHECKING:
-    from .harness import Harness
+    from ..harness import Harness
 
 WORKER_SYSTEM_TEMPLATE = """\
 你是 Worker {worker_id}，负责执行一个具体子任务。

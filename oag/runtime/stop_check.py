@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..hooks import HookResult
+from .hooks import HookResult
 
 
 def default_stop_hook(context: dict) -> HookResult:

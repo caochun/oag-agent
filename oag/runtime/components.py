@@ -5,8 +5,7 @@ from typing import Callable
 
 from openai import OpenAI
 
-from ..context import ContextManager
-from ..hooks import AuditLog, HookRegistry, audit_log_hook, business_review_hook, write_confirmation_hook
+from ..llm.context import ContextManager
 from ..ontology.data_executor import DataExecutor
 from ..ontology.registry import FunctionRegistry
 from ..ontology.rules import RuleEngine
@@ -17,6 +16,7 @@ from ..tools.pipeline import ToolExecutionPipeline, ToolResult
 from ..tools.registry import ToolRegistry
 from ..tools.runtime_tools import RuntimeTools
 from .config import HarnessConfig
+from .hooks import AuditLog, HookRegistry, audit_log_hook, business_review_hook, write_confirmation_hook
 from .stop_check import default_stop_hook
 from .trace import TraceRecorder
 

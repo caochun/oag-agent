@@ -7,7 +7,7 @@ from openai import OpenAI
 from .runtime import HarnessConfig, ToolUseContext
 from .runtime.components import build_harness_components
 from .tools.pipeline import ToolResult
-from .worker import run_workers_parallel
+from .loop.worker import run_workers_parallel
 from .ontology.registry import FunctionRegistry
 from .ontology.schema import Ontology
 from .ontology.store import Store
