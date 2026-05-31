@@ -13,7 +13,7 @@ from openai import OpenAI
 
 from ..runtime.events import (
     CompactEvent, ConfirmationEvent, DebugEvent, Event, QuestionEvent,
-    TextEvent, ToolCallEvent,
+    ReasoningEvent, TextEvent, ToolCallEvent,
 )
 from ..llm.retry import call_llm_with_retry
 from ..runtime import RunState
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 
 PendingConfirmationHandler = Callable[[str, str, dict, str, list[dict]], None]
+MAX_REASONING_CHARS = 5000
 
 
 class QueryLoop:
@@ -77,6 +78,8 @@ class QueryLoop:
             msg = response.choices[0].message
 
             yield self._build_response_debug_event(msg)
+            if reasoning := self._extract_reasoning_content(msg):
+                yield ReasoningEvent(content=reasoning)
 
             if not msg.tool_calls:
                 yield from self._handle_final_response(state, msg.content or "")
@@ -225,3 +228,16 @@ class QueryLoop:
         if msg.content:
             resp_summary += f"\nLLM文本: {msg.content[:300]}"
         return DebugEvent(stage="response", content=resp_summary)
+
+    def _extract_reasoning_content(self, msg) -> str:
+        # llama-server exposes reasoning as an OpenAI-compatible extra field.
+        reasoning = getattr(msg, "reasoning_content", None)
+        if not reasoning:
+            extra = getattr(msg, "model_extra", None) or {}
+            reasoning = extra.get("reasoning_content")
+        if not reasoning:
+            return ""
+        reasoning = str(reasoning)
+        if len(reasoning) <= MAX_REASONING_CHARS:
+            return reasoning
+        return reasoning[:MAX_REASONING_CHARS] + f"\n[... reasoning 已截断，原始长度 {len(reasoning)} 字符]"

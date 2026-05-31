@@ -239,6 +239,39 @@ def test_query_loop_records_final_response_transition(monkeypatch):
     assert trace_events[-1].payload["reason"] == "final_response"
 
 
+def test_query_loop_emits_reasoning_event_without_persisting_it(monkeypatch):
+    harness = make_harness()
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content="This is a complete final answer for the user.",
+                        reasoning_content="Internal reasoning trace.",
+                        tool_calls=None,
+                    ),
+                ),
+            ],
+        )
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Question?"}]
+    state = RunState(messages=messages, session_id="s1", user_question="Question?")
+
+    events = list(loop.run(state))
+
+    assert [event.type for event in events] == ["debug", "debug", "reasoning", "text"]
+    assert events[2].content == "Internal reasoning trace."
+    assert all("Internal reasoning trace." not in msg.get("content", "") for msg in messages)
+
+
 def test_confirmation_flow_handles_missing_pending():
     harness = make_harness()
     saved = []

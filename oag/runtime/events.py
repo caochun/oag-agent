@@ -65,6 +65,12 @@ class DebugEvent(Event):
     content: str = ""
 
 
+@dataclass
+class ReasoningEvent(Event):
+    type: str = "reasoning"
+    content: str = ""
+
+
 def event_to_dict(event: Event) -> dict:
     result = {"type": event.type}
     for k, v in event.__dict__.items():
