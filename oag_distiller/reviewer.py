@@ -7,7 +7,7 @@ import logging
 
 import yaml
 
-from ..ontology.schema import Ontology
+from oag.ontology.schema import Ontology
 from .llm import DistillerLLM
 from .prompts import FIX_SYSTEM, FIX_USER, REVIEW_SYSTEM, REVIEW_USER
 
