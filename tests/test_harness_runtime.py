@@ -148,6 +148,17 @@ def make_harness(config: HarnessConfig | None = None) -> Harness:
                     "status": PropertyDef(type="str", description="Order status"),
                 },
             ),
+            "AuditNote": ObjectTypeDef(
+                summary="Agent note summary",
+                description="Agent generated append-only note",
+                source=ObjectSourceDef(type="memory", id_field="note_id"),
+                data_source="agent_generated",
+                mutability="append_only",
+                properties={
+                    "note_id": PropertyDef(type="str", required=True, description="Note id"),
+                    "status": PropertyDef(type="str", description="Note status"),
+                },
+            ),
         },
         functions={
             "lookup_asset": FunctionDef(
@@ -173,6 +184,13 @@ def make_harness(config: HarnessConfig | None = None) -> Harness:
                     Effect(object="WorkOrder", field="status", set_to="created"),
                 ],
             ),
+            "create_audit_note": FunctionDef(
+                summary="Create an audit note",
+                description="Create append-only agent note",
+                function_type="business",
+                writes_to=["AuditNote"],
+                params={"asset_id": FunctionParam(type="str", description="Asset id")},
+            ),
             "set_asset_threshold": FunctionDef(
                 summary="Set asset threshold",
                 function_type="get",
@@ -196,6 +214,11 @@ def make_harness(config: HarnessConfig | None = None) -> Harness:
         "create_work_order",
         lambda asset_id: {"order_id": "WO1", "asset_id": asset_id, "status": "created"},
         ontology.functions["create_work_order"],
+    )
+    registry.register(
+        "create_audit_note",
+        lambda asset_id: {"note_id": "N1", "asset_id": asset_id, "status": "created"},
+        ontology.functions["create_audit_note"],
     )
     registry.register(
         "set_asset_threshold",
@@ -561,6 +584,63 @@ def test_mutating_read_only_resolver_source_is_blocked_before_adapter_write():
 
     assert result.blocked
     assert "只读对象" in result.content
+
+
+def test_agent_generated_append_only_create_does_not_need_confirmation():
+    harness = make_harness(HarnessConfig(enable_write_confirmation=True))
+
+    result = harness.execute_tool(
+        "mutate",
+        {"operation": "create", "object_type": "AuditNote", "data": {"note_id": "N2"}},
+    )
+
+    assert not result.blocked
+    assert not result.needs_confirmation
+    assert json.loads(result.content)["inserted"] == 1
+
+
+def test_agent_generated_mutable_mutate_still_needs_confirmation():
+    harness = make_harness(HarnessConfig(enable_write_confirmation=True))
+
+    result = harness.execute_tool(
+        "mutate",
+        {"operation": "create", "object_type": "WorkOrder", "data": {"order_id": "WO2"}},
+    )
+
+    assert result.blocked
+    assert result.needs_confirmation
+
+
+def test_mutate_validation_still_runs_after_confirmation():
+    harness = make_harness(HarnessConfig(enable_write_confirmation=True))
+
+    result = harness.execute_tool(
+        "mutate",
+        {"operation": "update", "object_type": "AuditNote", "object_id": "N1", "data": {"status": "done"}},
+        confirmed=True,
+    )
+
+    assert result.blocked
+    assert "仅支持追加写入" in result.content
+
+
+def test_agent_generated_append_only_business_function_does_not_need_confirmation():
+    harness = make_harness(HarnessConfig(enable_write_confirmation=True))
+
+    result = harness.execute_tool("create_audit_note", {"asset_id": "A1"})
+
+    assert not result.blocked
+    assert not result.needs_confirmation
+    assert json.loads(result.content)["note_id"] == "N1"
+
+
+def test_agent_generated_mutable_business_function_still_needs_confirmation():
+    harness = make_harness(HarnessConfig(enable_write_confirmation=True))
+
+    result = harness.execute_tool("create_work_order", {"asset_id": "A1"})
+
+    assert result.blocked
+    assert result.needs_confirmation
 
 
 def test_worker_system_prompt_uses_summary_not_full_context():

@@ -30,6 +30,7 @@ class ToolResult:
 class ToolPolicyRuntime(Protocol):
     def validate_mutate(self, args: dict) -> str | None: ...
     def check_constraints(self, tool_name: str, args: dict) -> str | None: ...
+    def requires_confirmation(self, tool_name: str, args: dict) -> bool: ...
 
 
 class ToolExecutionPipeline:
@@ -133,7 +134,7 @@ class ToolExecutionPipeline:
 
     def _validate_mutation(self, tool_name: str, args: dict,
                            context: ToolUseContext) -> ToolResult | None:
-        if tool_name != "mutate" or context.confirmed:
+        if tool_name != "mutate":
             return None
 
         pre_check = self.ont.validate_mutate(args)
@@ -144,6 +145,9 @@ class ToolExecutionPipeline:
     def _run_pre_tool_hooks(self, tool_name: str, args: dict, tool: ToolDef,
                             context: ToolUseContext) -> ToolResult | None:
         if context.confirmed:
+            return None
+
+        if tool.requires_confirmation and not self.ont.requires_confirmation(tool_name, args):
             return None
 
         pre_result = self.hooks.fire("pre_tool_call", {

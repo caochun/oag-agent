@@ -123,6 +123,41 @@ class OntologyValidator:
                                    "available_fields": available}, ensure_ascii=False)
         return None
 
+    def requires_confirmation(self, tool_name: str, args: dict) -> bool:
+        if tool_name == "mutate":
+            return self._mutate_requires_confirmation(args)
+
+        fdef = self.registry.get_def(tool_name)
+        if not fdef:
+            return False
+
+        if fdef.writes_to:
+            return not self._all_agent_append_only(fdef.writes_to)
+        return fdef.function_type == "business"
+
+    def _mutate_requires_confirmation(self, args: dict) -> bool:
+        object_type = args.get("object_type", "")
+        operation = args.get("operation", "")
+        obj_def = self.ontology.objects.get(object_type)
+        if not obj_def:
+            return True
+        return not (
+            operation == "create"
+            and obj_def.data_source == "agent_generated"
+            and obj_def.mutability == "append_only"
+        )
+
+    def _all_agent_append_only(self, object_types: list[str]) -> bool:
+        if not object_types:
+            return False
+        for object_type in object_types:
+            obj_def = self.ontology.objects.get(object_type)
+            if not obj_def:
+                return False
+            if obj_def.data_source != "agent_generated" or obj_def.mutability != "append_only":
+                return False
+        return True
+
     def _find_object_type(self, object_id: Any) -> str | None:
         for type_name in self.ontology.objects:
             row = self.store.query_by_id(type_name, object_id)

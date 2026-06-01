@@ -72,6 +72,9 @@ class OntologyRuntime:
     def validate_mutate(self, args: dict) -> str | None:
         return self._validator.validate_mutate(args)
 
+    def requires_confirmation(self, tool_name: str, args: dict) -> bool:
+        return self._validator.requires_confirmation(tool_name, args)
+
     def inspect(self, target: str) -> str:
         return self._inspector.inspect(target)
 
