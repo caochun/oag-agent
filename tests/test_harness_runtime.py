@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from oag.harness import Harness, HarnessConfig
+from oag.agent import Agent
 from oag.loop.confirmation_flow import ConfirmationFlow
 from oag.loop.query_loop import QueryLoop
 from oag.loop.tool_executor import ToolExecutor
@@ -590,6 +591,30 @@ def test_trace_records_successful_tool_execution():
     assert [event.event_type for event in events] == ["tool_start", "tool_end"]
     assert events[0].payload["tool_name"] == "lookup_asset"
     assert events[1].payload["content_preview"]
+
+
+def test_trace_records_jsonl_when_configured(tmp_path):
+    trace_path = tmp_path / "trace.jsonl"
+    harness = make_harness(HarnessConfig(
+        enable_write_confirmation=False,
+        trace_jsonl_path=str(trace_path),
+    ))
+
+    harness.execute_tool("lookup_asset", {"asset_id": "A1"})
+
+    lines = trace_path.read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in lines]
+    assert [record["event_type"] for record in records] == ["tool_start", "tool_end"]
+    assert records[0]["session_id"] == ""
+    assert records[0]["payload"]["tool_name"] == "lookup_asset"
+
+
+def test_agent_sets_default_trace_jsonl_path(tmp_path):
+    harness = make_harness()
+
+    Agent(harness, DummyClient(), "dummy-model", db_dir=str(tmp_path))
+
+    assert harness.trace.jsonl_path == str(tmp_path / "trace_TestDomain.jsonl")
 
 
 def test_tool_pipeline_records_cache_hit_for_repeated_read_tool():

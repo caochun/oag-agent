@@ -24,6 +24,10 @@ from .runtime.session_store import SessionStore
 class Agent:
     def __init__(self, harness: Harness, llm_client: OpenAI, model: str,
                  db_dir: str = ".oag_data"):
+        Path(db_dir).mkdir(parents=True, exist_ok=True)
+        if not harness.config.trace_jsonl_path:
+            harness.trace.jsonl_path = str(Path(db_dir) / f"trace_{harness.ontology.name}.jsonl")
+
         self.harness = harness
         self.client = llm_client
         self.model = model
@@ -40,7 +44,6 @@ class Agent:
             run_loop=self._run_loop,
         )
 
-        Path(db_dir).mkdir(parents=True, exist_ok=True)
         db_path = str(Path(db_dir) / f"chat_{harness.ontology.name}.db")
         self.sessions = SessionStore(db_path)
 

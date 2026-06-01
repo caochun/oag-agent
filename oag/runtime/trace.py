@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -19,8 +21,9 @@ class TraceEvent:
 
 
 class TraceRecorder:
-    def __init__(self, enabled: bool = True):
+    def __init__(self, enabled: bool = True, jsonl_path: str = ""):
         self.enabled = enabled
+        self.jsonl_path = jsonl_path
         self._events: list[TraceEvent] = []
         self._lock = Lock()
 
@@ -41,6 +44,7 @@ class TraceRecorder:
         )
         with self._lock:
             self._events.append(event)
+            self._write_jsonl(event)
         return event
 
     def snapshot(self) -> list[TraceEvent]:
@@ -50,3 +54,20 @@ class TraceRecorder:
     def clear(self):
         with self._lock:
             self._events.clear()
+
+    def _write_jsonl(self, event: TraceEvent):
+        if not self.jsonl_path:
+            return
+
+        path = Path(self.jsonl_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "timestamp": event.timestamp,
+            "event_type": event.event_type,
+            "session_id": event.session_id,
+            "source": event.source,
+            "turn_count": event.turn_count,
+            "payload": event.payload,
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")

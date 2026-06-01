@@ -74,7 +74,7 @@ def build_harness_components(
     data = DataExecutor(repository, registry)
     tools = ToolRegistry()
     cache: dict[str, ToolResult] = {}
-    trace = TraceRecorder()
+    trace = TraceRecorder(jsonl_path=config.trace_jsonl_path)
     # 工具 handler 尽量保持简单；统一的策略、校验、缓存、审计都在 pipeline 中完成。
     tool_pipeline = ToolExecutionPipeline(
         tools=tools,

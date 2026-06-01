@@ -16,3 +16,4 @@ class HarnessConfig:
     runtime_context: dict[str, str] = field(default_factory=dict)
     include_ontology_full_context: bool = False
     enable_analysis_tools: bool = False
+    trace_jsonl_path: str = ""
