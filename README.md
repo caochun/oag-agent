@@ -290,7 +290,8 @@ Harness
 ### DataExecutor、ObjectRepository 与 Adapters
 
 `DataExecutor` 是工具层的数据执行器。它接收 `query`、`count`、`query_links`、
-`mutate`、`search`、`describe`、`pivot`、`distribution` 等工具调用，然后交给
+`mutate`、`search`、`describe` 等工具调用；开启 `enable_analysis_tools` 后还会接收
+`pivot`、`distribution`，然后交给
 `ObjectRepository`。
 
 `ObjectRepository` 是对象数据访问边界，也是领域函数拿到的数据入口。它不拥有本地
@@ -503,8 +504,6 @@ prompt 更清晰，也更容易按函数维护。
 - `count`
 - `query_links`
 - `describe`
-- `pivot`
-- `distribution`
 - `mutate`
 - `search`
 - `apply_rule`
@@ -514,6 +513,8 @@ prompt 更清晰，也更容易按函数维护。
 - `summarize_progress`
 - `ask_user`
 - `dispatch_workers`
+
+`pivot`、`distribution` 属于可选分析工具，需通过 `HarnessConfig(enable_analysis_tools=True)` 开启。
 
 实际可用工具取决于 ontology 中是否声明了关系、规则、工作流和业务函数。
 

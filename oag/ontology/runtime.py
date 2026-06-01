@@ -18,6 +18,7 @@ from .schema import Ontology
 from .tool_registration import OntologyToolRegistrar
 from .validators import OntologyValidator
 from .workflow_runtime import WorkflowRuntime
+from ..runtime.config import HarnessConfig
 from ..tools.registry import ToolRegistry
 
 
@@ -27,11 +28,13 @@ class OntologyRuntime:
     def __init__(self, ontology: Ontology,
                  registry: FunctionRegistry,
                  repository: ObjectRepository,
-                 rule_engine: RuleEngine | None = None):
+                 rule_engine: RuleEngine | None = None,
+                 config: HarnessConfig | None = None):
         self.ontology = ontology
         self.repository = repository
         self.registry = registry
         self.rule_engine = rule_engine
+        self.config = config or HarnessConfig()
 
         self._prompt_builder = OntologyPromptBuilder(ontology, registry)
         self._validator = OntologyValidator(ontology, self.repository, registry)
@@ -42,6 +45,7 @@ class OntologyRuntime:
             registry=registry,
             rule_engine=rule_engine,
             runtime=self,
+            enable_analysis_tools=self.config.enable_analysis_tools,
         )
 
     def build_system_prompt(self, domain_context: str = "") -> str:

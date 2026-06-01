@@ -12,12 +12,13 @@ from typing import TYPE_CHECKING, Callable, Generator
 
 from openai import APIStatusError, OpenAI
 
+from .tool_executor import ToolExecutor
 from ..runtime.events import (
     CompactEvent, ConfirmationEvent, DebugEvent, Event, QuestionEvent,
     ReasoningEvent, TextEvent, ToolCallEvent,
 )
 from ..llm.retry import call_llm_with_retry
-from ..runtime import RunState, ToolUseContext
+from ..runtime import RunState
 from ..tools.pipeline import ToolResult
 from ..runtime.message_sanitizer import sanitize_messages
 
@@ -29,6 +30,12 @@ PendingConfirmationHandler = Callable[[str, str, dict, str, list[dict], RunState
 MAX_REASONING_CHARS = 5000
 
 
+class _ToolExecutionPaused(Exception):
+    def __init__(self, events: list[Event]):
+        super().__init__("tool execution paused")
+        self.events = events
+
+
 class QueryLoop:
     def __init__(self, harness: Harness, llm_client: OpenAI, model: str,
                  on_pending_confirmation: PendingConfirmationHandler):
@@ -36,6 +43,7 @@ class QueryLoop:
         self.client = llm_client
         self.model = model
         self.on_pending_confirmation = on_pending_confirmation
+        self.tool_executor = ToolExecutor(harness)
 
     def run(self, state: RunState) -> Generator[Event, None, None]:
         tools = self.harness.build_tools()
@@ -131,68 +139,33 @@ class QueryLoop:
                 ],
             })
 
-            for index, tc in enumerate(msg.tool_calls):
+            tool_calls_parsed = []
+            for tc in msg.tool_calls:
                 args, parse_error = self._parse_tool_args(tc.function.arguments)
-                result = parse_error or self.harness.execute_tool(
-                    tc.function.name,
-                    args,
-                    context=ToolUseContext(
-                        session_id=state.session_id,
-                        messages=state.messages,
-                        confirmed=False,
-                    ),
-                )
-                if result.needs_confirmation:
-                    # 暂停当前循环并保存现场；用户响应后由 ConfirmationFlow 继续。
-                    skipped_tool_calls = self._build_skipped_tool_calls(msg.tool_calls[index + 1:])
-                    self.harness.trace.record(
-                        "agent_transition",
-                        session_id=state.session_id,
-                        turn_count=state.turn_count,
-                        reason="confirmation_required",
-                        tool_name=tc.function.name,
-                    )
-                    self.on_pending_confirmation(
-                        state.session_id,
-                        tc.function.name,
-                        args,
-                        tc.id,
-                        messages,
-                        state,
-                        skipped_tool_calls,
-                    )
-                    if tc.function.name == "ask_user":
-                        yield QuestionEvent(
-                            question=args.get("question", ""),
-                            options=args.get("options", []),
-                            multi_select=args.get("multi_select", False),
-                        )
-                    else:
-                        yield ConfirmationEvent(
-                            tool_name=tc.function.name,
-                            args=args,
-                            reason=result.block_reason,
-                        )
-                    return
+                if parse_error:
+                    tool_calls_parsed.append((tc, args, parse_error))
+                else:
+                    tool_calls_parsed.append((tc, args, None))
 
-                preview_len = 5000 if tc.function.name == "dispatch_workers" else 200
-                yield ToolCallEvent(
-                    name=tc.function.name,
-                    args=args,
-                    result=result.content[:preview_len],
-                )
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result.content,
-                })
-
-                if result.blocked:
-                    messages.append({
-                        "role": "user",
-                        "content": f"[系统提示] 工具 {tc.function.name} 被阻止: {result.block_reason}",
-                    })
+            executable_calls = []
+            for index, (tc, args, parse_error) in enumerate(tool_calls_parsed):
+                if parse_error:
+                    try:
+                        yield from self._execute_tool_call_segment(state, messages, msg, executable_calls)
+                    except _ToolExecutionPaused as paused:
+                        for event in paused.events:
+                            yield event
+                        return
+                    executable_calls = []
+                    yield from self._handle_tool_result(state, messages, msg, index, tc, args, parse_error)
+                    continue
+                executable_calls.append((index, tc, args))
+            try:
+                yield from self._execute_tool_call_segment(state, messages, msg, executable_calls)
+            except _ToolExecutionPaused as paused:
+                for event in paused.events:
+                    yield event
+                return
 
             state.stop_hook_active = False
             state.transition_reason = "next_turn"
@@ -202,6 +175,85 @@ class QueryLoop:
                 turn_count=state.turn_count,
                 reason=state.transition_reason,
             )
+
+    def _execute_tool_call_segment(self, state: RunState, messages: list[dict], msg,
+                                   executable_calls: list[tuple[int, object, dict]]) -> Generator[Event, None, None]:
+        if not executable_calls:
+            return
+
+        index_by_tool_call_id = {tc.id: index for index, tc, _ in executable_calls}
+        pending_events: list[Event] = []
+
+        def handle_executed_result(tc, args, result):
+            index = index_by_tool_call_id[tc.id]
+            for event in self._handle_tool_result(state, messages, msg, index, tc, args, result):
+                pending_events.append(event)
+
+        try:
+            self.tool_executor.execute_tool_calls(
+                [(tc, args) for _, tc, args in executable_calls],
+                state,
+                on_result=handle_executed_result,
+            )
+        except _ToolExecutionPaused:
+            raise _ToolExecutionPaused(pending_events)
+        for event in pending_events:
+            yield event
+
+    def _handle_tool_result(self, state: RunState, messages: list[dict], msg,
+                            index: int, tc, args: dict,
+                            result: ToolResult) -> Generator[Event, None, None]:
+        if result.needs_confirmation:
+            # 暂停当前循环并保存现场；用户响应后由 ConfirmationFlow 继续。
+            skipped_tool_calls = self._build_skipped_tool_calls(msg.tool_calls[index + 1:])
+            self.harness.trace.record(
+                "agent_transition",
+                session_id=state.session_id,
+                turn_count=state.turn_count,
+                reason="confirmation_required",
+                tool_name=tc.function.name,
+            )
+            self.on_pending_confirmation(
+                state.session_id,
+                tc.function.name,
+                args,
+                tc.id,
+                messages,
+                state,
+                skipped_tool_calls,
+            )
+            if tc.function.name == "ask_user":
+                yield QuestionEvent(
+                    question=args.get("question", ""),
+                    options=args.get("options", []),
+                    multi_select=args.get("multi_select", False),
+                )
+            else:
+                yield ConfirmationEvent(
+                    tool_name=tc.function.name,
+                    args=args,
+                    reason=result.block_reason,
+                )
+            raise _ToolExecutionPaused([])
+
+        preview_len = 5000 if tc.function.name == "dispatch_workers" else 200
+        yield ToolCallEvent(
+            name=tc.function.name,
+            args=args,
+            result=result.content[:preview_len],
+        )
+
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "content": result.content,
+        })
+
+        if result.blocked:
+            messages.append({
+                "role": "user",
+                "content": f"[系统提示] 工具 {tc.function.name} 被阻止: {result.block_reason}",
+            })
 
     def _handle_final_response(self, state: RunState,
                                content: str,

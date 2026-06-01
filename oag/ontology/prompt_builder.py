@@ -111,7 +111,7 @@ class OntologyPromptBuilder:
         parts = []
         parts.append("\n## 工具使用规则")
         parts.append("- 查询数据: 使用 query/count/query_links")
-        parts.append("- 统计分析: 使用 describe/pivot/distribution")
+        parts.append("- 统计摘要: 使用 describe")
         parts.append("- 应用规则: 使用 apply_rule（确定性，不要自己推理）")
         parts.append("- 查看详情: 使用 inspect 获取函数/对象/规则的完整定义；不要假设摘要里没有出现的字段或约束")
         parts.append("- 业务操作: 调用注册的业务函数")

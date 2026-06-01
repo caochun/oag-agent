@@ -15,6 +15,22 @@ from .schema import Ontology
 from ..tools.registry import ToolDef, ToolPolicy, ToolRegistry
 
 
+JSON_SCHEMA_TYPE_MAP = {
+    "str": "string",
+    "string": "string",
+    "int": "integer",
+    "integer": "integer",
+    "float": "number",
+    "number": "number",
+    "bool": "boolean",
+    "boolean": "boolean",
+    "dict": "object",
+    "object": "object",
+    "list": "array",
+    "array": "array",
+}
+
+
 class OntologyToolRuntime(Protocol):
     def inspect(self, target: str) -> str: ...
     def start_workflow(self, args: dict) -> str: ...
@@ -26,11 +42,13 @@ class OntologyToolRegistrar:
     """Registers ontology/data/business tools into the harness tool registry."""
 
     def __init__(self, ontology: Ontology, registry: FunctionRegistry,
-                 rule_engine: RuleEngine | None, runtime: OntologyToolRuntime):
+                 rule_engine: RuleEngine | None, runtime: OntologyToolRuntime,
+                 enable_analysis_tools: bool = False):
         self.ontology = ontology
         self.registry = registry
         self.rule_engine = rule_engine
         self.runtime = runtime
+        self.enable_analysis_tools = enable_analysis_tools
 
     def register_tools(self, tools: ToolRegistry, data: DataExecutor):
         obj_types = list(self.ontology.objects.keys())
@@ -72,19 +90,20 @@ class OntologyToolRegistrar:
             category="analysis",
         ))
 
-        tools.register(ToolDef(
-            name="pivot", description="透视表分析",
-            parameters={"type": "object", "properties": {"object_type": {"type": "string", "enum": obj_types}, "index": {"type": "string"}, "columns": {"type": "string"}, "values": {"type": "string"}, "aggfunc": {"type": "string", "enum": ["mean", "sum", "count", "min", "max"]}}, "required": ["object_type", "index", "columns", "values"]},
-            handler=lambda args: data.execute("pivot", args),
-            category="analysis",
-        ))
+        if self.enable_analysis_tools:
+            tools.register(ToolDef(
+                name="pivot", description="透视表分析",
+                parameters={"type": "object", "properties": {"object_type": {"type": "string", "enum": obj_types}, "index": {"type": "string"}, "columns": {"type": "string"}, "values": {"type": "string"}, "aggfunc": {"type": "string", "enum": ["mean", "sum", "count", "min", "max"]}}, "required": ["object_type", "index", "columns", "values"]},
+                handler=lambda args: data.execute("pivot", args),
+                category="analysis",
+            ))
 
-        tools.register(ToolDef(
-            name="distribution", description="分布直方图",
-            parameters={"type": "object", "properties": {"object_type": {"type": "string", "enum": obj_types}, "column": {"type": "string"}, "bins": {"type": "integer"}}, "required": ["object_type", "column"]},
-            handler=lambda args: data.execute("distribution", args),
-            category="analysis",
-        ))
+            tools.register(ToolDef(
+                name="distribution", description="分布直方图",
+                parameters={"type": "object", "properties": {"object_type": {"type": "string", "enum": obj_types}, "column": {"type": "string"}, "bins": {"type": "integer"}}, "required": ["object_type", "column"]},
+                handler=lambda args: data.execute("distribution", args),
+                category="analysis",
+            ))
 
         tools.register(ToolDef(
             name="mutate",
@@ -167,7 +186,7 @@ class OntologyToolRegistrar:
             required = []
             for pname, pdef in fdef.params.items():
                 props[pname] = {
-                    "type": pdef.type if pdef.type in ("string", "integer", "number") else "string",
+                    "type": JSON_SCHEMA_TYPE_MAP.get(pdef.type, "string"),
                     "description": pdef.description,
                 }
                 if pdef.default is None:

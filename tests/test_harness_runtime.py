@@ -172,6 +172,15 @@ def make_harness(config: HarnessConfig | None = None) -> Harness:
                     Effect(object="WorkOrder", field="status", set_to="created"),
                 ],
             ),
+            "set_asset_threshold": FunctionDef(
+                summary="Set asset threshold",
+                function_type="get",
+                params={
+                    "asset_id": FunctionParam(type="str", description="Asset id"),
+                    "threshold": FunctionParam(type="float", description="Threshold"),
+                    "enabled": FunctionParam(type="bool", description="Enabled"),
+                },
+            ),
         },
     )
     registry = FunctionRegistry()
@@ -186,6 +195,15 @@ def make_harness(config: HarnessConfig | None = None) -> Harness:
         "create_work_order",
         lambda asset_id: {"order_id": "WO1", "asset_id": asset_id, "status": "created"},
         ontology.functions["create_work_order"],
+    )
+    registry.register(
+        "set_asset_threshold",
+        lambda asset_id, threshold, enabled: {
+            "asset_id": asset_id,
+            "threshold": threshold,
+            "enabled": enabled,
+        },
+        ontology.functions["set_asset_threshold"],
     )
 
     return Harness(
@@ -267,6 +285,42 @@ def test_prompt_uses_summary_context_and_inspect_for_details():
     assert details["usage_prompt"] == "创建前必须确认 asset_id 指向真实资产，并说明写入影响。"
     assert details["preconditions"][0]["object"] == "Asset"
     assert details["effects"][0]["set_to"] == "created"
+
+
+def test_analysis_tools_are_opt_in():
+    harness = make_harness()
+
+    assert harness.tools.has("describe")
+    assert not harness.tools.has("pivot")
+    assert not harness.tools.has("distribution")
+
+    harness = make_harness(HarnessConfig(enable_analysis_tools=True))
+
+    assert harness.tools.has("describe")
+    assert harness.tools.has("pivot")
+    assert harness.tools.has("distribution")
+
+
+def test_function_param_types_map_to_json_schema_types():
+    harness = make_harness()
+
+    params = harness.tools.get("set_asset_threshold").parameters["properties"]
+
+    assert params["asset_id"]["type"] == "string"
+    assert params["threshold"]["type"] == "number"
+    assert params["enabled"]["type"] == "boolean"
+
+
+def test_function_param_schema_rejects_string_for_float():
+    harness = make_harness()
+
+    result = harness.execute_tool(
+        "set_asset_threshold",
+        {"asset_id": "A1", "threshold": "2500", "enabled": True},
+    )
+
+    assert result.blocked
+    assert "threshold 类型错误: 期望 number" in result.content
 
 
 def test_prompt_sections_are_layered_and_cached():
@@ -679,6 +733,58 @@ def test_tool_executor_partitions_tool_calls_by_concurrency_policy():
         ["mutate"],
         ["lookup_asset"],
     ]
+
+
+def test_tool_executor_runs_concurrency_safe_batch_in_parallel():
+    harness = make_harness()
+    executor = ToolExecutor(harness)
+
+    def slow_result(label):
+        def handler(args):
+            time.sleep(0.08)
+            return json.dumps({"label": label})
+        return handler
+
+    harness.tools.register(ToolDef(
+        name="slow_a",
+        description="Slow read tool A",
+        parameters={"type": "object", "properties": {}},
+        handler=slow_result("a"),
+        policy=ToolPolicy(read_only=True, concurrency_safe=True),
+    ))
+    harness.tools.register(ToolDef(
+        name="slow_b",
+        description="Slow read tool B",
+        parameters={"type": "object", "properties": {}},
+        handler=slow_result("b"),
+        policy=ToolPolicy(read_only=True, concurrency_safe=True),
+    ))
+    state = RunState(messages=[], session_id="s1", user_question="")
+
+    start = time.perf_counter()
+    results = executor.execute_tool_calls([
+        (make_tool_call("slow_a", "t1"), {}),
+        (make_tool_call("slow_b", "t2"), {}),
+    ], state)
+    elapsed = time.perf_counter() - start
+
+    assert [tc.id for tc, _, _ in results] == ["t1", "t2"]
+    assert [json.loads(result.content)["label"] for _, _, result in results] == ["a", "b"]
+    assert elapsed < 0.14
+
+
+def test_tool_executor_stops_before_later_calls_when_confirmation_needed():
+    harness = make_harness(HarnessConfig(enable_write_confirmation=True))
+    executor = ToolExecutor(harness)
+    state = RunState(messages=[], session_id="s1", user_question="")
+
+    results = executor.execute_tool_calls([
+        (make_tool_call("create_work_order", "t1"), {"asset_id": "A1"}),
+        (make_tool_call("lookup_asset", "t2"), {"asset_id": "A1"}),
+    ], state)
+
+    assert [tc.id for tc, _, _ in results] == ["t1"]
+    assert results[0][2].needs_confirmation
 
 
 def test_query_loop_records_final_response_transition(monkeypatch):

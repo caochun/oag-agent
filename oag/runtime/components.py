@@ -69,6 +69,7 @@ def build_harness_components(
         registry,
         repository=repository,
         rule_engine=rule_engine,
+        config=config,
     )
     data = DataExecutor(repository, registry)
     tools = ToolRegistry()
