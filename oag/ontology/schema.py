@@ -133,6 +133,7 @@ class WorkflowDef(BaseModel):
 class Ontology(BaseModel):
     name: str
     description: str = ""
+    tool_preferences: dict[str, Any] = {}
     objects: dict[str, ObjectTypeDef] = {}
     links: dict[str, LinkDef] = {}
     functions: dict[str, FunctionDef] = {}

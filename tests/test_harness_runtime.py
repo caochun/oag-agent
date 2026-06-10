@@ -122,10 +122,12 @@ def make_repository(ontology: Ontology, registry: FunctionRegistry) -> ObjectRep
     return ObjectRepository(ontology, registry)
 
 
-def make_harness(config: HarnessConfig | None = None) -> Harness:
+def make_harness(config: HarnessConfig | None = None,
+                 tool_preferences: dict | None = None) -> Harness:
     ontology = Ontology(
         name="TestDomain",
         description="Test domain",
+        tool_preferences=tool_preferences or {},
         objects={
             "Asset": ObjectTypeDef(
                 summary="Asset summary",
@@ -458,6 +460,18 @@ def test_runtime_tools_have_usage_prompts():
     assert "使用说明:" in dispatch_tool["function"]["description"]
     assert "相互独立的只读子任务" in dispatch_tool["function"]["description"]
     assert "不要询问可以通过只读工具直接查到的信息" in ask_tool["function"]["description"]
+
+
+def test_generic_search_can_be_marked_fallback_only_per_ontology():
+    default_harness = make_harness()
+    fallback_harness = make_harness(tool_preferences={"generic_search": "fallback_only"})
+
+    default_description = default_harness.tools.get("search").description
+    fallback_description = fallback_harness.tools.get("search").description
+
+    assert "兜底定位工具" not in default_description
+    assert "兜底定位工具" in fallback_description
+    assert "优先使用领域函数" in fallback_description
 
 
 class AssetViewResolver:
@@ -889,6 +903,51 @@ def test_tool_pipeline_persists_large_tool_result_to_system_temp_by_default():
     payload = json.loads(result.content)
 
     assert payload["path"].startswith(str(Path(tempfile.gettempdir()) / "oag-tool-results"))
+
+
+def test_read_tool_result_reads_persisted_default_temp_result():
+    harness = make_harness()
+    harness.tools.register(ToolDef(
+        name="large_temp_tool",
+        description="Large temp test tool",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda args: "z" * 1500,
+        max_result_chars=20,
+    ))
+
+    result = harness.execute_tool(
+        "large_temp_tool",
+        {},
+        context=ToolUseContext(session_id="read-tool-result-session"),
+    )
+    payload = json.loads(result.content)
+
+    read_result = harness.execute_tool(
+        "read_tool_result",
+        {"path": payload["path"], "max_chars": 1000},
+    )
+    read_payload = json.loads(read_result.content)
+
+    assert read_payload["path"] == payload["path"]
+    assert read_payload["chars"] == 1500
+    assert read_payload["returned_chars"] == 1000
+    assert read_payload["truncated"] is True
+    assert read_payload["content"] == "z" * 1000
+
+
+def test_read_tool_result_rejects_non_tool_result_path(tmp_path):
+    harness = make_harness()
+    ordinary_file = tmp_path / "ordinary.txt"
+    ordinary_file.write_text("secret", encoding="utf-8")
+
+    result = harness.execute_tool(
+        "read_tool_result",
+        {"path": str(ordinary_file)},
+    )
+    payload = json.loads(result.content)
+
+    assert "error" in payload
+    assert "持久化工具结果目录" in payload["error"]
 
 
 def test_trace_records_worker_policy_block():

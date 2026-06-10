@@ -10,6 +10,7 @@ import json
 from typing import Callable
 
 from ..llm.context import ContextManager
+from ..runtime.tool_result_store import read_persisted_tool_result
 from .registry import ToolDef, ToolPolicy, ToolRegistry
 
 
@@ -54,6 +55,29 @@ class RuntimeTools:
                 concurrency_safe=False,
                 worker_allowed=False,
                 idempotent=False,
+            ),
+        ))
+
+        tools.register(ToolDef(
+            name="read_tool_result",
+            description="读取 OAG 持久化的大型工具结果文件。仅用于读取工具返回中 persisted=true 的 path，不用于读取业务文档。",
+            parameters={"type": "object", "properties": {
+                "path": {"type": "string", "description": "persisted 工具结果中的 path"},
+                "max_chars": {"type": "integer", "description": "最多返回字符数，默认50000，最多200000"},
+            }, "required": ["path"]},
+            handler=lambda args: read_persisted_tool_result(
+                path=args.get("path", ""),
+                max_chars=args.get("max_chars", 50000) or 50000,
+            ),
+            usage_prompt="仅当某个工具结果返回 persisted=true 且需要完整内容时调用。不要用领域 read_document 读取 /tmp/oag-tool-results 或 tool-results 路径；业务文档仍使用领域自己的读取工具。",
+            category="query",
+            max_result_chars=100000,
+            policy=ToolPolicy(
+                read_only=True,
+                requires_confirmation=False,
+                concurrency_safe=True,
+                worker_allowed=True,
+                idempotent=True,
             ),
         ))
 

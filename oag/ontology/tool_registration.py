@@ -123,7 +123,7 @@ class OntologyToolRegistrar:
 
         tools.register(ToolDef(
             name="search",
-            description="跨对象类型全文搜索。在所有（或指定）对象类型的文本字段中搜索关键词",
+            description=self._generic_search_description(),
             parameters={"type": "object", "properties": {"keyword": {"type": "string", "description": "搜索关键词"}, "object_types": {"type": "array", "items": {"type": "string", "enum": obj_types}, "description": "限定搜索的对象类型（可选，不填搜索全部）"}, "limit": {"type": "integer", "description": "最大返回条数（默认20）"}}, "required": ["keyword"]},
             handler=lambda args: data.execute("search", args),
             category="query",
@@ -204,6 +204,7 @@ class OntologyToolRegistrar:
                 category="action" if has_writes else "query",
                 is_read_only=not has_writes,
                 requires_confirmation=has_writes or is_business,
+                max_result_chars=30000,
                 policy=ToolPolicy(
                     read_only=not has_writes,
                     requires_confirmation=has_writes or is_business,
@@ -213,3 +214,12 @@ class OntologyToolRegistrar:
                     destructive=has_writes or is_business,
                 ),
             ))
+
+    def _generic_search_description(self) -> str:
+        description = "跨对象类型全文搜索。在所有（或指定）对象类型的文本字段中搜索关键词"
+        if self.ontology.tool_preferences.get("generic_search") == "fallback_only":
+            description += (
+                "。本领域将通用 search 作为兜底定位工具：当存在领域专用检索/问答函数时，"
+                "优先使用领域函数；不要仅根据通用 search 的片段直接回答文档正文内容。"
+            )
+        return description
