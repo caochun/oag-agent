@@ -88,6 +88,7 @@ class FunctionDef(BaseModel):
     summary: str = ""
     usage_prompt: str = ""
     group: str = ""
+    user_visible: bool = True
     depends_on: list[str] = []
     hint: str = ""
     params: dict[str, FunctionParam] = {}

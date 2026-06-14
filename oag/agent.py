@@ -7,6 +7,7 @@ Agent 负责聊天会话、待确认操作、流式/SSE 输出和历史持久化
 from __future__ import annotations
 
 from pathlib import Path
+from time import monotonic
 from typing import Generator
 
 from openai import OpenAI
@@ -74,13 +75,44 @@ class Agent:
             messages.append({"role": "system", "content": system_prompt})
 
         messages.append({"role": "user", "content": message})
+        self.sessions.save(session_id, messages)
 
         state = RunState(messages=messages, session_id=session_id, user_question=message)
-        yield from self._run_loop(state)
-        self.sessions.save(session_id, messages)
+        streamed_content = ""
+        completed = False
+        last_snapshot_at = monotonic()
+        last_snapshot_len = 0
+        try:
+            for event in self._run_loop(state):
+                if isinstance(event, TextEvent) and event.content:
+                    streamed_content += event.content
+                    now = monotonic()
+                    if (
+                        len(streamed_content) - last_snapshot_len >= 512
+                        or now - last_snapshot_at >= 1.0
+                    ):
+                        self._save_stream_snapshot(session_id, messages, streamed_content)
+                        last_snapshot_at = now
+                        last_snapshot_len = len(streamed_content)
+                yield event
+            completed = True
+            self.sessions.save(session_id, messages)
+        finally:
+            if not completed and streamed_content:
+                self._save_stream_snapshot(session_id, messages, streamed_content)
 
     def _run_loop(self, state: RunState) -> Generator[Event, None, None]:
         yield from self.query_loop.run(state)
+
+    def _save_stream_snapshot(self, session_id: str, messages: list[dict],
+                              streamed_content: str):
+        snapshot = [dict(message) for message in messages]
+        if streamed_content:
+            if snapshot and snapshot[-1].get("role") == "assistant":
+                snapshot[-1]["content"] = streamed_content
+            else:
+                snapshot.append({"role": "assistant", "content": streamed_content})
+        self.sessions.save(session_id, snapshot)
 
     def _set_pending_confirmation(self, session_id: str, tool_name: str, args: dict,
                                   tool_call_id: str, messages: list[dict],
