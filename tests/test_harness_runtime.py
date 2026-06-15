@@ -1166,9 +1166,10 @@ def test_query_loop_aggregates_streaming_tool_calls(monkeypatch):
 
     events = list(loop.run(state))
 
-    assert [event.type for event in events[:3]] == ["debug", "debug", "tool_call"]
+    assert [event.type for event in events[:4]] == ["debug", "debug", "tool_call", "tool_result"]
     assert events[2].name == "lookup_asset"
-    assert '"asset_id": "A1"' in events[2].result
+    assert events[2].args == {"asset_id": "A1"}
+    assert '"asset_id": "A1"' in events[3].result
     assert messages[2]["tool_calls"][0]["function"]["arguments"] == '{"asset_id":"A1"}'
 
 
@@ -1202,7 +1203,9 @@ def test_confirmation_required_stops_before_later_tool_calls(monkeypatch):
 
     events = list(loop.run(state))
 
-    assert [event.type for event in events] == ["debug", "debug", "confirmation_required"]
+    assert [event.type for event in events] == ["debug", "debug", "tool_call", "confirmation_required"]
+    assert events[2].name == "create_work_order"
+    assert events[2].args == {"asset_id": "A1"}
     assert executed == ["create_work_order"]
     assert len(pending) == 1
     assert pending[0][6] == [{"tool_call_id": "tool_2", "content": '{"skipped": true, "reason": "前一个工具调用需要用户确认，本调用未执行"}'}]
@@ -1266,7 +1269,7 @@ def test_query_loop_invalid_tool_json_returns_tool_error(monkeypatch):
     messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Lookup"}]
     events = list(loop.run(RunState(messages=messages, session_id="s1", user_question="Lookup")))
 
-    assert any(event.type == "tool_call" and "工具参数不是合法 JSON" in event.result for event in events)
+    assert any(event.type == "tool_result" and "工具参数不是合法 JSON" in event.result for event in events)
     assert messages[3]["role"] == "tool"
     assert "工具参数不是合法 JSON" in messages[3]["content"]
 

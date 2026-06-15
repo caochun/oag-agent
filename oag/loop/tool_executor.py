@@ -24,27 +24,11 @@ class ToolExecutor:
                            on_result: Callable[[Any, dict, Any], None] | None = None) -> list[tuple[Any, dict, Any]]:
         results: list[tuple[Any, dict, Any]] = []
         for batch in self.partition_tool_calls(tool_calls_parsed):
-            if len(batch) > 1:
-                batch_results = self._execute_parallel_batch(batch, state)
-                results.extend(batch_results)
-                for tc, args, result in batch_results:
-                    if on_result:
-                        on_result(tc, args, result)
-                continue
-
-            tc, args = batch[0]
-            result = self.harness.execute_tool(
-                tc.function.name,
-                args,
-                context=ToolUseContext(
-                    session_id=state.session_id,
-                    messages=state.messages,
-                    confirmed=False,
-                ),
-            )
-            results.append((tc, args, result))
-            if on_result:
-                on_result(tc, args, result)
+            batch_results = self.execute_batch(batch, state)
+            results.extend(batch_results)
+            for tc, args, result in batch_results:
+                if on_result:
+                    on_result(tc, args, result)
             if result.needs_confirmation:
                 break
         return results
@@ -66,6 +50,23 @@ class ToolExecutor:
             bool((tool := self.harness.tools.get(tc.function.name)) and tool.policy and tool.policy.concurrency_safe)
             for tc, _ in batch
         )
+
+    def execute_batch(self, batch: list[tuple[Any, dict]],
+                      state: RunState) -> list[tuple[Any, dict, Any]]:
+        if len(batch) > 1:
+            return self._execute_parallel_batch(batch, state)
+
+        tc, args = batch[0]
+        result = self.harness.execute_tool(
+            tc.function.name,
+            args,
+            context=ToolUseContext(
+                session_id=state.session_id,
+                messages=state.messages,
+                confirmed=False,
+            ),
+        )
+        return [(tc, args, result)]
 
     def _execute_parallel_batch(self, batch: list[tuple[Any, dict]],
                                 state: RunState) -> list[tuple[Any, dict, Any]]:

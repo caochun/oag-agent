@@ -10,7 +10,7 @@ import json
 from typing import TYPE_CHECKING, Callable, Generator
 
 from ..runtime import PendingConfirmation, RunState, ToolUseContext
-from ..runtime.events import Event, TextEvent, ToolCallEvent
+from ..runtime.events import Event, TextEvent, ToolCallEvent, ToolResultEvent
 
 if TYPE_CHECKING:
     from ..harness import Harness
@@ -65,12 +65,16 @@ class ConfirmationFlow:
             messages=messages,
             confirmed=True,
         )
-        result = self.harness.execute_tool(pending.tool_name, pending.args, context=context)
-
         yield ToolCallEvent(
             name=pending.tool_name,
             args=pending.args,
+        )
+        result = self.harness.execute_tool(pending.tool_name, pending.args, context=context)
+
+        yield ToolResultEvent(
+            name=pending.tool_name,
             result=result.content[:200],
+            blocked=bool(result.blocked),
         )
 
         messages.append({

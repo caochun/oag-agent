@@ -135,6 +135,7 @@ class Ontology(BaseModel):
     name: str
     description: str = ""
     tool_preferences: dict[str, Any] = {}
+    excluded_tools: list[str] = []
     objects: dict[str, ObjectTypeDef] = {}
     links: dict[str, LinkDef] = {}
     functions: dict[str, FunctionDef] = {}

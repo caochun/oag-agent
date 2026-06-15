@@ -101,7 +101,15 @@ class Harness:
             and self._tools_cache_version == self.tools.version
         ):
             return self._tools_cache
-        self._tools_cache = self.tools.build_tools()
+        hidden_tools = set(self.ontology.excluded_tools or [])
+        hidden_tools.update(
+            name for name, fdef in self.ontology.functions.items()
+            if not fdef.user_visible
+        )
+        self._tools_cache = [
+            tool for tool in self.tools.build_tools()
+            if tool.get("function", {}).get("name") not in hidden_tools
+        ]
         self._tools_cache_version = self.tools.version
         return self._tools_cache
 
@@ -150,13 +158,18 @@ class Harness:
         return list(sections)
 
     def build_runtime_context(self) -> str:
+        ontology_details = (
+            "完整函数、对象、规则定义请调用 inspect 获取"
+            if "inspect" not in set(self.ontology.excluded_tools or [])
+            else "当前领域仅暴露可用工具摘要"
+        )
         lines = [
             "## 运行时上下文",
             f"- session_time: {datetime.now().astimezone().isoformat(timespec='seconds')}",
             f"- mode: {'write_confirmation' if self.config.enable_write_confirmation else 'no_write_confirmation'}",
             f"- audit: {'enabled' if self.config.enable_audit else 'disabled'}",
             f"- max_turns: {self.config.max_turns}",
-            "- ontology_details: 摘要常驻；完整函数、对象、规则定义请调用 inspect 获取",
+            f"- ontology_details: 摘要常驻；{ontology_details}",
         ]
         for key, value in self.config.runtime_context.items():
             clean_key = str(key).strip()
@@ -171,8 +184,15 @@ class Harness:
             self.ont.build_base_system_prompt(),
             self.ont.build_ontology_summary(),
             "## 背景信息（主 Agent 已获取）\n" + (context or "(无)"),
-            "## 要求\n- 直接执行任务，不要重复查询主 Agent 已提供的信息\n- 需要完整定义时调用 inspect，不要依赖主 Agent 的完整历史\n- 完成后用 1-3 句话总结关键结果\n- 包含具体数据（等级、数值、状态）",
         ]
+        requirements = [
+            "直接执行任务，不要重复查询主 Agent 已提供的信息",
+            "完成后用 1-3 句话总结关键结果",
+            "包含具体数据（等级、数值、状态）",
+        ]
+        if "inspect" not in set(self.ontology.excluded_tools or []):
+            requirements.insert(1, "需要完整定义时调用 inspect，不要依赖主 Agent 的完整历史")
+        sections.append("## 要求\n" + "\n".join(f"- {item}" for item in requirements))
         return "\n\n".join(section for section in sections if section.strip())
 
     def build_ontology_full_context(self) -> str:

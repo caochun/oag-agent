@@ -15,7 +15,7 @@ from openai import APIStatusError, OpenAI
 from .tool_executor import ToolExecutor
 from ..runtime.events import (
     CompactEvent, ConfirmationEvent, DebugEvent, Event, QuestionEvent,
-    ReasoningEvent, TextEvent, ToolCallEvent,
+    ReasoningEvent, TextEvent, ToolCallEvent, ToolResultEvent,
 )
 from ..llm.retry import call_llm_with_retry
 from ..runtime import RunState
@@ -47,13 +47,18 @@ class QueryLoop:
 
     def run(self, state: RunState) -> Generator[Event, None, None]:
         tools = self.harness.build_tools()
+        visible_tool_names = {
+            tool.get("function", {}).get("name")
+            for tool in tools
+            if tool.get("function", {}).get("name")
+        }
 
         while True:
             # 一次循环对应一个模型回合，以及该回合触发的工具执行结果。
             state.turn_count += 1
             sanitized_messages, sanitized = sanitize_messages(
                 state.messages,
-                repair_missing_tool_results=False,
+                repair_missing_tool_results=True,
             )
             if sanitized:
                 state.messages[:] = sanitized_messages
@@ -159,7 +164,24 @@ class QueryLoop:
                             yield event
                         return
                     executable_calls = []
+                    yield ToolCallEvent(name=tc.function.name, args=args)
                     yield from self._handle_tool_result(state, messages, msg, index, tc, args, parse_error)
+                    continue
+                if tc.function.name not in visible_tool_names:
+                    result = ToolResult(
+                        content=json.dumps(
+                            {
+                                "error": "工具不可用",
+                                "tool": tc.function.name,
+                                "details": "该工具未对当前领域助手开放，请改用可用工具。",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        blocked=True,
+                        block_reason="工具未对当前领域助手开放",
+                    )
+                    yield ToolCallEvent(name=tc.function.name, args=args)
+                    yield from self._handle_tool_result(state, messages, msg, index, tc, args, result)
                     continue
                 executable_calls.append((index, tc, args))
             try:
@@ -192,11 +214,18 @@ class QueryLoop:
                 pending_events.append(event)
 
         try:
-            self.tool_executor.execute_tool_calls(
-                [(tc, args) for _, tc, args in executable_calls],
-                state,
-                on_result=handle_executed_result,
-            )
+            parsed = [(tc, args) for _, tc, args in executable_calls]
+            for batch in self.tool_executor.partition_tool_calls(parsed):
+                for tc, args in batch:
+                    yield ToolCallEvent(
+                        name=tc.function.name,
+                        args=args,
+                    )
+                batch_results = self.tool_executor.execute_batch(batch, state)
+                for tc, args, result in batch_results:
+                    handle_executed_result(tc, args, result)
+                if any(result.needs_confirmation for _tc, _args, result in batch_results):
+                    break
         except _ToolExecutionPaused:
             raise _ToolExecutionPaused(pending_events)
         for event in pending_events:
@@ -238,11 +267,10 @@ class QueryLoop:
                 )
             raise _ToolExecutionPaused([])
 
-        preview_len = 5000 if tc.function.name == "dispatch_workers" else 200
-        yield ToolCallEvent(
+        yield ToolResultEvent(
             name=tc.function.name,
-            args=args,
-            result=result.content[:preview_len],
+            result=result.content[:self._tool_result_preview_len(tc.function.name)],
+            blocked=bool(result.blocked),
         )
 
         messages.append({
@@ -256,6 +284,9 @@ class QueryLoop:
                 "role": "user",
                 "content": f"[系统提示] 工具 {tc.function.name} 被阻止: {result.block_reason}",
             })
+
+    def _tool_result_preview_len(self, tool_name: str) -> int:
+        return 5000 if tool_name == "dispatch_workers" else 200
 
     def _handle_final_response(self, state: RunState,
                                content: str,

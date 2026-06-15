@@ -17,6 +17,12 @@ class OntologyPromptBuilder:
         self.ontology = ontology
         self.registry = registry
 
+    def _is_function_visible(self, name: str, fdef) -> bool:
+        return bool(fdef and fdef.user_visible and name not in set(self.ontology.excluded_tools or []))
+
+    def _is_tool_visible(self, name: str) -> bool:
+        return name not in set(self.ontology.excluded_tools or [])
+
     def build_system_prompt(self, domain_context: str = "") -> str:
         return "\n\n".join(self.build_static_sections(domain_context))
 
@@ -93,7 +99,7 @@ class OntologyPromptBuilder:
 
         fn_lines = []
         for name, fdef in self.registry.list_functions():
-            if not fdef:
+            if not self._is_function_visible(name, fdef):
                 continue
             fn_parts = [f"- {name}"]
             if fdef.function_type:
@@ -103,30 +109,45 @@ class OntologyPromptBuilder:
         if fn_lines:
             parts.append("\n## 可用函数")
             parts.extend(fn_lines)
-            parts.append("(这里只提供摘要。需要函数、对象或规则完整定义时，调用 inspect。)")
+            if self._is_tool_visible("inspect"):
+                parts.append("(这里只提供摘要。需要函数、对象或规则完整定义时，调用 inspect。)")
 
         return "\n".join(parts)
 
     def build_tool_usage_rules(self) -> str:
         parts = []
         parts.append("\n## 工具使用规则")
-        parts.append("- 查询数据: 使用 query/count/query_links")
-        parts.append("- 统计摘要: 使用 describe")
-        parts.append("- 应用规则: 使用 apply_rule（确定性，不要自己推理）")
-        parts.append("- 查看详情: 使用 inspect 获取函数/对象/规则的完整定义；不要假设摘要里没有出现的字段或约束")
-        parts.append("- 业务操作: 调用注册的业务函数")
-        parts.append("- 数据变更: 使用 mutate 创建/更新/删除对象实例（需用户确认）")
-        parts.append("- 全文搜索: 使用 search 跨类型关键词搜索")
+        query_tools = [
+            name for name in ("query", "count", "query_links")
+            if self._is_tool_visible(name)
+        ]
+        if query_tools:
+            parts.append(f"- 查询数据: 使用 {'/'.join(query_tools)}")
+        if self._is_tool_visible("describe"):
+            parts.append("- 统计摘要: 使用 describe")
+        if self._is_tool_visible("apply_rule"):
+            parts.append("- 应用规则: 使用 apply_rule（确定性，不要自己推理）")
+        if self._is_tool_visible("inspect"):
+            parts.append("- 查看详情: 使用 inspect 获取函数/对象/规则的完整定义；不要假设摘要里没有出现的字段或约束")
+        parts.append("- 业务操作: 调用当前可用的注册业务函数")
+        if self._is_tool_visible("mutate"):
+            parts.append("- 数据变更: 使用 mutate 创建/更新/删除对象实例（需用户确认）")
+        if self._is_tool_visible("search"):
+            parts.append("- 全文搜索: 使用 search 跨类型关键词搜索")
         if self.ontology.workflows:
             parts.append("- 工作流: 使用 start_workflow 启动和跟踪工作流进度")
-        parts.append("- 进度总结: 使用 summarize_progress 回顾对话进展")
-        parts.append("- 用户决策: 遇到多种可行方案或需要用户确认偏好时，使用 ask_user 提问")
-        parts.append("- 并行执行: 当有多个相互独立的子任务可以同时进行时，使用 dispatch_workers 并行执行以提高效率")
+        if self._is_tool_visible("summarize_progress"):
+            parts.append("- 进度总结: 使用 summarize_progress 回顾对话进展")
+        if self._is_tool_visible("ask_user"):
+            parts.append("- 用户决策: 遇到多种可行方案或需要用户确认偏好时，使用 ask_user 提问")
+        if self._is_tool_visible("dispatch_workers"):
+            parts.append("- 并行执行: 当有多个相互独立的子任务可以同时进行时，使用 dispatch_workers 并行执行以提高效率")
 
         parts.append("\n## 重要行为规则")
-        parts.append("- 当存在多个可行方案时，必须使用 ask_user 让用户选择，不要自行决定")
-        parts.append("- 当任务涉及优先级或策略权衡时，使用 ask_user 确认用户偏好后再执行")
-        parts.append("- 当关键参数有多种合理取值时，使用 ask_user 让用户确认")
+        if self._is_tool_visible("ask_user"):
+            parts.append("- 当存在多个可行方案时，必须使用 ask_user 让用户选择，不要自行决定")
+            parts.append("- 当任务涉及优先级或策略权衡时，使用 ask_user 确认用户偏好后再执行")
+            parts.append("- 当关键参数有多种合理取值时，使用 ask_user 让用户确认")
 
         return "\n".join(parts)
 
@@ -148,7 +169,7 @@ class OntologyPromptBuilder:
     def _build_all_function_details(self) -> list[str]:
         details: list[str] = []
         for fn_name, fdef in self.registry.list_functions():
-            if not fdef:
+            if not self._is_function_visible(fn_name, fdef):
                 continue
 
             lines = [f"### 函数: {fn_name}"]

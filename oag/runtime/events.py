@@ -29,6 +29,14 @@ class ToolCallEvent(Event):
 
 
 @dataclass
+class ToolResultEvent(Event):
+    type: str = "tool_result"
+    name: str = ""
+    result: str = ""
+    blocked: bool = False
+
+
+@dataclass
 class CompactEvent(Event):
     type: str = "compact"
     before_tokens: int = 0

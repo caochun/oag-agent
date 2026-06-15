@@ -26,6 +26,8 @@ class OntologyInspector:
 
         fdef = self.registry.get_def(target)
         if fdef:
+            if not fdef.user_visible or target in set(self.ontology.excluded_tools or []):
+                return json.dumps({"error": f"未找到: {target}"}, ensure_ascii=False)
             return json.dumps({
                 "kind": "function",
                 "name": target,
