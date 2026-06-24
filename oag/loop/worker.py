@@ -86,6 +86,7 @@ class Worker:
                 messages=messages,
                 tools=tools if tools else None,
                 temperature=0.1,
+                max_tokens=self.harness.config.max_response_tokens,
             )
             msg = response.choices[0].message
 

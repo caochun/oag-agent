@@ -14,6 +14,7 @@ from oag.loop.tool_executor import ToolExecutor
 from oag.llm.context import ContextManager
 from oag.llm.context_usage import collect_context_usage
 from oag.runtime.message_sanitizer import sanitize_messages
+from oag.runtime.tool_result_store import read_persisted_tool_result
 from oag.ontology.registry import FunctionRegistry
 from oag.runtime import PendingConfirmation, RunState, ToolUseContext
 from oag.ontology.schema import (
@@ -933,6 +934,20 @@ def test_read_tool_result_reads_persisted_default_temp_result():
     assert read_payload["returned_chars"] == 1000
     assert read_payload["truncated"] is True
     assert read_payload["content"] == "z" * 1000
+
+
+def test_read_tool_result_defaults_to_limited_window_and_caps_max_chars():
+    payload_path = Path(tempfile.gettempdir()) / "oag-tool-results" / "read-default-window" / "large_tool.txt"
+    payload_path.parent.mkdir(parents=True, exist_ok=True)
+    payload_path.write_text("a" * 60000, encoding="utf-8")
+
+    default_payload = json.loads(read_persisted_tool_result(path=str(payload_path)))
+    assert default_payload["returned_chars"] == 12000
+    assert default_payload["truncated"] is True
+
+    capped_payload = json.loads(read_persisted_tool_result(path=str(payload_path), max_chars=100000))
+    assert capped_payload["returned_chars"] == 50000
+    assert capped_payload["truncated"] is True
 
 
 def test_read_tool_result_rejects_non_tool_result_path(tmp_path):

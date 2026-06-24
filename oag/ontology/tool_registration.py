@@ -204,7 +204,7 @@ class OntologyToolRegistrar:
                 category="action" if has_writes else "query",
                 is_read_only=not has_writes,
                 requires_confirmation=has_writes or is_business,
-                max_result_chars=30000,
+                max_result_chars=12000,
                 policy=ToolPolicy(
                     read_only=not has_writes,
                     requires_confirmation=has_writes or is_business,

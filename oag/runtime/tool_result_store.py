@@ -39,7 +39,7 @@ def persist_large_tool_result(*, storage_dir: str | None,
 
 
 def read_persisted_tool_result(*, path: str,
-                               max_chars: int = 50000,
+                               max_chars: int = 12000,
                                storage_dir: str | None = None) -> str:
     requested = Path(path).expanduser().resolve()
     allowed_roots = [_base_dir(None).resolve()]
@@ -53,7 +53,7 @@ def read_persisted_tool_result(*, path: str,
         )
     if not requested.exists() or not requested.is_file():
         return _json_error("未找到持久化工具结果文件。", path=str(requested))
-    max_chars = max(1000, min(int(max_chars or 50000), 200000))
+    max_chars = max(1000, min(int(max_chars or 12000), 50000))
     content = requested.read_text(encoding="utf-8", errors="replace")
     truncated = len(content) > max_chars
     return json.dumps({
