@@ -1516,6 +1516,44 @@ def test_stop_check_treats_empty_latest_assistant_as_incomplete():
     assert "未生成最终回答" in result
 
 
+def test_query_loop_filters_tools_per_run_allowed_tools(monkeypatch):
+    harness = make_harness()
+    available = [
+        tool["function"]["name"]
+        for tool in harness.build_tools()
+        if tool.get("function", {}).get("name")
+    ]
+    assert len(available) >= 2
+    allowed = frozenset({available[0]})
+    captured = {}
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        captured["tools"] = [
+            tool["function"]["name"]
+            for tool in kwargs.get("tools") or []
+        ]
+        return make_response(content="Done.")
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    state = RunState(
+        messages=[{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Question?"}],
+        session_id="s1",
+        user_question="Question?",
+        allowed_tools=allowed,
+    )
+
+    events = list(loop.run(state))
+
+    assert captured["tools"] == [available[0]]
+    assert events[-1].type == "text"
+
+
 def test_stop_check_blocks_success_claim_after_unhandled_tool_error():
     harness = make_harness()
     messages = [

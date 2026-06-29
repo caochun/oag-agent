@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 @dataclass
 class RunState:
     messages: list[dict]
     session_id: str
     user_question: str = ""
+    allowed_tools: frozenset[str] | None = None
     turn_count: int = 0
     stop_hook_active: bool = False
     transition_reason: str | None = None
@@ -24,6 +24,7 @@ class PendingConfirmation:
     messages: list[dict]
     skipped_tool_calls: list[dict] | None = None
     user_question: str = ""
+    allowed_tools: frozenset[str] | None = None
     turn_count: int = 0
     stop_hook_active: bool = False
 

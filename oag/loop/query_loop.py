@@ -46,7 +46,7 @@ class QueryLoop:
         self.tool_executor = ToolExecutor(harness)
 
     def run(self, state: RunState) -> Generator[Event, None, None]:
-        tools = self.harness.build_tools()
+        tools = self._filter_tools_for_run(self.harness.build_tools(), state.allowed_tools)
         visible_tool_names = {
             tool.get("function", {}).get("name")
             for tool in tools
@@ -69,6 +69,8 @@ class QueryLoop:
                 turn_count=state.turn_count,
                 message_count=len(messages),
                 stop_hook_active=state.stop_hook_active,
+                allowed_tool_count=len(visible_tool_names),
+                allowed_tools=sorted(visible_tool_names) if state.allowed_tools is not None else None,
             )
             if state.turn_count > self.harness.config.max_turns:
                 self.harness.trace.record(
@@ -96,12 +98,11 @@ class QueryLoop:
             try:
                 response = call_llm_with_retry(
                     self.client,
-                    model=self.model,
-                    messages=messages,
-                    tools=tools if tools else None,
-                    temperature=0.1,
-                    max_tokens=self.harness.config.max_response_tokens,
-                    stream=True,
+                    **self._request_kwargs(
+                        messages=messages,
+                        tools=tools if tools else None,
+                        stream=True,
+                    ),
                 )
             except Exception as exc:
                 if not self._is_context_overflow_error(exc):
@@ -113,12 +114,11 @@ class QueryLoop:
                 self._record_context_usage(state, tools)
                 response = call_llm_with_retry(
                     self.client,
-                    model=self.model,
-                    messages=messages,
-                    tools=tools if tools else None,
-                    temperature=0.1,
-                    max_tokens=self.harness.config.max_response_tokens,
-                    stream=True,
+                    **self._request_kwargs(
+                        messages=messages,
+                        tools=tools if tools else None,
+                        stream=True,
+                    ),
                 )
             msg = yield from self._consume_llm_response(response)
 
@@ -366,6 +366,29 @@ class QueryLoop:
             largest_tool_results=usage["messages"]["largest_tool_results"],
             largest_tools=usage["tools"]["largest_tools"],
         )
+
+    def _request_kwargs(self, *, messages: list[dict], tools: list[dict] | None,
+                        stream: bool) -> dict:
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "temperature": 0.1,
+            "max_tokens": self.harness.config.max_response_tokens,
+            "stream": stream,
+        }
+        if self.harness.config.llm_extra_body:
+            kwargs["extra_body"] = self.harness.config.llm_extra_body
+        return kwargs
+
+    @staticmethod
+    def _filter_tools_for_run(tools: list[dict], allowed_tools: frozenset[str] | None) -> list[dict]:
+        if allowed_tools is None:
+            return tools
+        return [
+            tool for tool in tools
+            if tool.get("function", {}).get("name") in allowed_tools
+        ]
 
     def _consume_llm_response(self, response) -> Generator[Event, None, SimpleNamespace]:
         if hasattr(response, "choices") and response.choices:

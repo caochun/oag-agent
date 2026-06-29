@@ -80,14 +80,16 @@ class Worker:
         tool_calls_log: list[dict] = []
 
         for _ in range(self.max_turns):
-            response = call_llm_with_retry(
-                self.client,
-                model=self.model,
-                messages=messages,
-                tools=tools if tools else None,
-                temperature=0.1,
-                max_tokens=self.harness.config.max_response_tokens,
-            )
+            request_kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "tools": tools if tools else None,
+                "temperature": 0.1,
+                "max_tokens": self.harness.config.max_response_tokens,
+            }
+            if self.harness.config.llm_extra_body:
+                request_kwargs["extra_body"] = self.harness.config.llm_extra_body
+            response = call_llm_with_retry(self.client, **request_kwargs)
             msg = response.choices[0].message
 
             if not msg.tool_calls:

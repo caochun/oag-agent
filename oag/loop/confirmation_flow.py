@@ -101,6 +101,7 @@ class ConfirmationFlow:
             messages=messages,
             session_id=session_id,
             user_question=pending.user_question if pending else "",
+            allowed_tools=pending.allowed_tools if pending else None,
             turn_count=pending.turn_count if pending else 0,
             stop_hook_active=pending.stop_hook_active if pending else False,
         )

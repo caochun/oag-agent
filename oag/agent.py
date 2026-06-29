@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from time import monotonic
-from typing import Generator
+from typing import Iterable, Generator
 
 from openai import OpenAI
 
@@ -48,9 +48,10 @@ class Agent:
         db_path = str(Path(db_dir) / f"chat_{harness.ontology.name}.db")
         self.sessions = SessionStore(db_path)
 
-    def chat(self, message: str, session_id: str = "default") -> str:
+    def chat(self, message: str, session_id: str = "default",
+             allowed_tools: Iterable[str] | None = None) -> str:
         result_parts = []
-        for event in self.chat_stream(message, session_id):
+        for event in self.chat_stream(message, session_id, allowed_tools=allowed_tools):
             if isinstance(event, TextEvent):
                 result_parts.append(event.content)
         return "".join(result_parts)
@@ -63,7 +64,8 @@ class Agent:
         pending = self._pending.pop(session_id, None)
         yield from self.confirmation_flow.confirm(pending, approved, answer)
 
-    def chat_stream(self, message: str, session_id: str = "default") -> Generator[Event, None, None]:
+    def chat_stream(self, message: str, session_id: str = "default",
+                    allowed_tools: Iterable[str] | None = None) -> Generator[Event, None, None]:
         if session_id in self._pending:
             yield TextEvent(content="当前会话有待确认的操作，请先确认或取消后再继续。")
             return
@@ -77,7 +79,12 @@ class Agent:
         messages.append({"role": "user", "content": message})
         self.sessions.save(session_id, messages)
 
-        state = RunState(messages=messages, session_id=session_id, user_question=message)
+        state = RunState(
+            messages=messages,
+            session_id=session_id,
+            user_question=message,
+            allowed_tools=frozenset(allowed_tools) if allowed_tools is not None else None,
+        )
         streamed_content = ""
         completed = False
         last_snapshot_at = monotonic()
@@ -126,6 +133,7 @@ class Agent:
             messages=messages,
             skipped_tool_calls=skipped_tool_calls,
             user_question=state.user_question,
+            allowed_tools=state.allowed_tools,
             turn_count=state.turn_count,
             stop_hook_active=state.stop_hook_active,
         )
@@ -133,8 +141,9 @@ class Agent:
     def sessions_save(self, session_id: str, messages: list[dict]):
         self.sessions.save(session_id, messages)
 
-    def chat_stream_sse(self, message: str, session_id: str = "default") -> Generator[dict, None, None]:
-        for event in self.chat_stream(message, session_id):
+    def chat_stream_sse(self, message: str, session_id: str = "default",
+                        allowed_tools: Iterable[str] | None = None) -> Generator[dict, None, None]:
+        for event in self.chat_stream(message, session_id, allowed_tools=allowed_tools):
             yield event_to_dict(event)
 
     def get_history(self, session_id: str) -> list[dict]:
