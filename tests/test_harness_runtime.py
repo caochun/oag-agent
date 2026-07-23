@@ -1091,6 +1091,47 @@ def test_query_loop_records_final_response_transition(monkeypatch):
     assert trace_events[-1].payload["reason"] == "final_response"
 
 
+def test_query_loop_finalizes_without_tools_after_turn_limit(monkeypatch):
+    harness = make_harness(HarnessConfig(max_turns=1))
+    calls = []
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return make_response(tool_calls=[
+                make_full_tool_call("lookup_asset", "tool_1", '{"asset_id":"A1"}'),
+            ])
+        assert kwargs["tools"] is None
+        assert "不要再调用任何工具" in kwargs["messages"][-1]["content"]
+        return make_response(content="Based on the retrieved record, asset A1 is available.")
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "Look up asset A1"},
+    ]
+    state = RunState(messages=messages, session_id="s1", user_question="Look up asset A1")
+
+    events = list(loop.run(state))
+    trace_events = harness.trace.snapshot()
+
+    assert len(calls) == 2
+    assert events[-1].type == "text"
+    assert events[-1].content == "Based on the retrieved record, asset A1 is available."
+    assert all("最大轮次" not in event.content for event in events if event.type == "text")
+    assert messages[-1] == {
+        "role": "assistant",
+        "content": "Based on the retrieved record, asset A1 is available.",
+    }
+    assert trace_events[-1].payload["reason"] == "max_turns_final_response"
+
+
 def test_query_loop_emits_reasoning_event_without_persisting_it(monkeypatch):
     harness = make_harness()
 

@@ -79,10 +79,8 @@ class QueryLoop:
                     turn_count=state.turn_count,
                     reason="max_turns_reached",
                 )
-                content = f"已达到最大轮次限制（{self.harness.config.max_turns}），本轮已停止。"
-                messages.append({"role": "assistant", "content": content})
-                yield TextEvent(content=content)
-                break
+                yield from self._finalize_at_turn_limit(state)
+                return
 
             if state.turn_count > 1 and state.turn_count % 5 == 0:
                 messages, compacted = self.harness.maybe_compact(messages)
@@ -201,6 +199,51 @@ class QueryLoop:
                 turn_count=state.turn_count,
                 reason=state.transition_reason,
             )
+
+    def _finalize_at_turn_limit(self, state: RunState) -> Generator[Event, None, None]:
+        instruction = (
+            "工具调用轮次已经用完。不要再调用任何工具，也不要提及轮次限制。"
+            "请仅依据对话中已有的工具结果，直接给用户一个简洁、明确的最终答复。"
+            "如果证据不足，说明已经确认的事实和仍缺少的信息，不要继续尝试查询。"
+        )
+        request_messages = [
+            *state.messages,
+            {"role": "system", "content": instruction},
+        ]
+        try:
+            response = call_llm_with_retry(
+                self.client,
+                **self._request_kwargs(
+                    messages=request_messages,
+                    tools=None,
+                    stream=True,
+                ),
+            )
+            msg = yield from self._consume_llm_response(response)
+            content = (msg.content or "").strip()
+            already_streamed = getattr(msg, "content_streamed", False)
+        except Exception as exc:
+            self.harness.trace.record(
+                "agent_turn_limit_finalize_error",
+                session_id=state.session_id,
+                turn_count=state.turn_count,
+                error=str(exc),
+            )
+            content = "当前已完成可用信息的查询，但未能生成最终总结。请缩小问题范围后重试。"
+            already_streamed = False
+
+        if not content:
+            content = "当前没有足够的已确认信息来回答该问题，请缩小问题范围后重试。"
+            already_streamed = False
+        state.messages.append({"role": "assistant", "content": content})
+        if not already_streamed:
+            yield TextEvent(content=content)
+        self.harness.trace.record(
+            "agent_transition",
+            session_id=state.session_id,
+            turn_count=state.turn_count,
+            reason="max_turns_final_response",
+        )
 
     def _execute_tool_call_segment(self, state: RunState, messages: list[dict], msg,
                                    executable_calls: list[tuple[int, object, dict]]) -> Generator[Event, None, None]:
