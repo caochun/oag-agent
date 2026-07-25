@@ -17,6 +17,7 @@ from oag.runtime.message_sanitizer import sanitize_messages
 from oag.runtime.tool_result_store import read_persisted_tool_result
 from oag.ontology.registry import FunctionRegistry
 from oag.runtime import PendingConfirmation, RunState, ToolUseContext
+from oag.runtime.hooks import HookResult
 from oag.ontology.schema import (
     Effect,
     FunctionDef,
@@ -811,6 +812,24 @@ def test_tool_pipeline_records_cache_hit_for_repeated_read_tool():
         "tool_start",
         "tool_cache_hit",
     ]
+
+
+def test_tool_pipeline_runs_post_hook_for_cached_result():
+    harness = make_harness()
+    captured = []
+    harness.hooks.register(
+        "post_tool_call",
+        lambda context: (
+            captured.append(context["result"])
+            or HookResult(action="allow")
+        ),
+    )
+
+    harness.execute_tool("lookup_asset", {"asset_id": "A1"})
+    harness.execute_tool("lookup_asset", {"asset_id": "A1"})
+
+    assert len(captured) == 2
+    assert captured[0] == captured[1]
 
 
 def test_tool_pipeline_validates_missing_required_arg():

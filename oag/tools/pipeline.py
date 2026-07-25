@@ -93,6 +93,13 @@ class ToolExecutionPipeline:
             return result
 
         if result := self._get_cached_result(tool_name, args, tool, context):
+            self._run_post_tool_hooks(
+                tool_name,
+                args,
+                tool,
+                result.raw_content or result.content,
+                context,
+            )
             self._record_tool_result("tool_cache_hit", tool_name, context, result)
             return result
 

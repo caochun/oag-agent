@@ -179,7 +179,11 @@ class PresentationToolDef(BaseModel):
     description: str = ""
     usage_prompt: str = ""
     category: str = "ui"
-    side_effect_scope: Literal["none", "frontend_map"] = "frontend_map"
+    side_effect_scope: Literal[
+        "none",
+        "frontend_map",
+        "frontend_editor",
+    ] = "frontend_map"
     mutates_domain: bool = False
     object_scope: Literal["none", "mappable", "listed"] = "none"
     allowed_objects: list[str] = []
