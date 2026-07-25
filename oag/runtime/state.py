@@ -13,6 +13,7 @@ class RunState:
     turn_count: int = 0
     stop_hook_active: bool = False
     transition_reason: str | None = None
+    cache_namespace: str = ""
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class PendingConfirmation:
     allowed_tools: frozenset[str] | None = None
     turn_count: int = 0
     stop_hook_active: bool = False
+    cache_namespace: str = ""
 
 
 @dataclass(frozen=True)
@@ -39,3 +41,4 @@ class ToolUseContext:
     allow_user_prompt: bool = True
     cancelled: bool = False
     storage_dir: str | None = None
+    cache_namespace: str = ""

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from contextvars import copy_context
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
@@ -108,7 +109,7 @@ class ToolExecutionPipeline:
             return result
 
         result = self._execute_handler(tool_name, args, tool, context)
-        self._store_cache_result(tool_name, args, tool, result)
+        self._store_cache_result(tool_name, args, tool, result, context)
 
         if tool_name == "mutate" and not result.blocked:
             self.cache.clear()
@@ -196,7 +197,7 @@ class ToolExecutionPipeline:
                            context: ToolUseContext) -> ToolResult | None:
         if not tool.is_read_only:
             return None
-        return self.cache.get(self._cache_key(tool_name, args))
+        return self.cache.get(self._cache_key(tool_name, args, context))
 
     def _check_constraints(self, tool_name: str, args: dict,
                            context: ToolUseContext) -> ToolResult | None:
@@ -253,7 +254,8 @@ class ToolExecutionPipeline:
             return ToolResult(content=raw_result, raw_content=raw_result)
 
         pool = ThreadPoolExecutor(max_workers=1)
-        future = pool.submit(tool.handler, args)
+        context = copy_context()
+        future = pool.submit(context.run, tool.handler, args)
         try:
             raw_result = future.result(timeout=timeout)
             return ToolResult(content=raw_result, raw_content=raw_result)
@@ -284,9 +286,9 @@ class ToolExecutionPipeline:
         ), True
 
     def _store_cache_result(self, tool_name: str, args: dict, tool: ToolDef,
-                            result: ToolResult):
+                            result: ToolResult, context: ToolUseContext):
         if tool.is_read_only:
-            self.cache[self._cache_key(tool_name, args)] = result
+            self.cache[self._cache_key(tool_name, args, context)] = result
 
     def _run_post_tool_hooks(self, tool_name: str, args: dict, tool: ToolDef,
                              raw_result: str, context: ToolUseContext) -> HookResult:
@@ -314,8 +316,30 @@ class ToolExecutionPipeline:
             content_preview=result.content[:300],
         )
 
-    def _cache_key(self, tool_name: str, args: dict) -> str:
-        return f"{tool_name}:{json.dumps(args, sort_keys=True)}"
+    def _cache_key(self, tool_name: str, args: dict,
+                   context: ToolUseContext) -> str:
+        # Read results may depend on live domain state (for example the active
+        # flood workspace and its ``latest`` forecast).  Cache only inside one
+        # agent run; falling back to the session keeps direct Harness callers
+        # isolated without coupling the generic runtime to a domain concept.
+        namespace = context.cache_namespace or context.session_id
+        return json.dumps(
+            [namespace, tool_name, args],
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def clear_cache_namespace(self, namespace: str) -> None:
+        if not namespace:
+            return
+        for key in list(self.cache):
+            try:
+                cached_namespace = json.loads(key)[0]
+            except (IndexError, TypeError, json.JSONDecodeError):
+                continue
+            if cached_namespace == namespace:
+                self.cache.pop(key, None)
 
     def _validate_tool_args(self, tool_name: str, args: dict,
                             tool: ToolDef) -> ToolResult | None:

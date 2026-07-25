@@ -7,7 +7,9 @@ Worker 用于执行彼此独立的子任务：它只能看到父任务显式传�
 from __future__ import annotations
 
 import json
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from typing import Any, TYPE_CHECKING
 
 from openai import OpenAI
@@ -65,6 +67,7 @@ class Worker:
         self.worker_id = worker_id
         self.max_turns = max_turns
         self.context = context
+        self.cache_namespace = f"worker-run:{uuid.uuid4().hex}"
 
     def run(self, task: str) -> dict:
         system = self.harness.build_worker_system_prompt(self.worker_id, self.context)
@@ -119,7 +122,11 @@ class Worker:
                     result = self.harness.execute_tool(
                         tc.function.name,
                         args,
-                        context=ToolUseContext(source="worker", confirmed=False),
+                        context=ToolUseContext(
+                            source="worker",
+                            confirmed=False,
+                            cache_namespace=self.cache_namespace,
+                        ),
                     )
                 except (json.JSONDecodeError, ValueError) as exc:
                     args = {}
@@ -158,11 +165,11 @@ def run_workers_parallel(harness: Any, llm_client: OpenAI, model: str,
             worker = Worker(harness, llm_client, model,
                             worker_id=f"W{i+1}", max_turns=5,
                             context=context)
-            future = pool.submit(worker.run, task)
-            futures[future] = i
+            future = pool.submit(copy_context().run, worker.run, task)
+            futures[future] = (i, worker.cache_namespace)
 
         for future in as_completed(futures):
-            idx = futures[future]
+            idx, cache_namespace = futures[future]
             try:
                 results[idx] = future.result()
             except Exception as e:
@@ -173,5 +180,7 @@ def run_workers_parallel(harness: Any, llm_client: OpenAI, model: str,
                     "tool_calls": [],
                     "status": "error",
                 }
+            finally:
+                harness.clear_tool_cache_namespace(cache_namespace)
 
     return results

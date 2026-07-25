@@ -64,6 +64,7 @@ class ConfirmationFlow:
             session_id=pending.session_id,
             messages=messages,
             confirmed=True,
+            cache_namespace=pending.cache_namespace,
         )
         yield ToolCallEvent(
             name=pending.tool_name,
@@ -100,6 +101,7 @@ class ConfirmationFlow:
         state = RunState(
             messages=messages,
             session_id=session_id,
+            cache_namespace=pending.cache_namespace if pending else "",
             user_question=pending.user_question if pending else "",
             allowed_tools=pending.allowed_tools if pending else None,
             turn_count=pending.turn_count if pending else 0,

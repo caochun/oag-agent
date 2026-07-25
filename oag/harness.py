@@ -68,6 +68,9 @@ class Harness:
         context = self._normalize_tool_context(session_id, confirmed, messages, context)
         return self.tool_pipeline.execute(tool_name, args, context)
 
+    def clear_tool_cache_namespace(self, namespace: str) -> None:
+        self.tool_pipeline.clear_cache_namespace(namespace)
+
     def _normalize_tool_context(self, session_id: str, confirmed: bool,
                                 messages: list[dict] | None,
                                 context: ToolUseContext | None) -> ToolUseContext:

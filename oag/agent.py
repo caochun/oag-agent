@@ -6,6 +6,7 @@ Agent 负责聊天会话、待确认操作、流式/SSE 输出和历史持久化
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from time import monotonic
 from typing import Iterable, Generator
@@ -62,7 +63,13 @@ class Agent:
     def confirm_tool(self, session_id: str, approved: bool,
                      answer: str | None = None) -> Generator[Event, None, None]:
         pending = self._pending.pop(session_id, None)
-        yield from self.confirmation_flow.confirm(pending, approved, answer)
+        try:
+            yield from self.confirmation_flow.confirm(pending, approved, answer)
+        finally:
+            if pending:
+                self.harness.clear_tool_cache_namespace(
+                    pending.cache_namespace,
+                )
 
     def chat_stream(self, message: str, session_id: str = "default",
                     allowed_tools: Iterable[str] | None = None) -> Generator[Event, None, None]:
@@ -79,9 +86,11 @@ class Agent:
         messages.append({"role": "user", "content": message})
         self.sessions.save(session_id, messages)
 
+        cache_namespace = f"agent-run:{uuid.uuid4().hex}"
         state = RunState(
             messages=messages,
             session_id=session_id,
+            cache_namespace=cache_namespace,
             user_question=message,
             allowed_tools=frozenset(allowed_tools) if allowed_tools is not None else None,
         )
@@ -107,6 +116,7 @@ class Agent:
         finally:
             if not completed and streamed_content:
                 self._save_stream_snapshot(session_id, messages, streamed_content)
+            self.harness.clear_tool_cache_namespace(cache_namespace)
 
     def _run_loop(self, state: RunState) -> Generator[Event, None, None]:
         yield from self.query_loop.run(state)
@@ -131,6 +141,7 @@ class Agent:
             args=args,
             tool_call_id=tool_call_id,
             messages=messages,
+            cache_namespace=state.cache_namespace,
             skipped_tool_calls=skipped_tool_calls,
             user_question=state.user_question,
             allowed_tools=state.allowed_tools,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -812,6 +813,53 @@ def test_tool_pipeline_records_cache_hit_for_repeated_read_tool():
         "tool_start",
         "tool_cache_hit",
     ]
+
+
+def test_tool_cache_does_not_cross_agent_run_namespaces():
+    harness = make_harness()
+
+    first = harness.execute_tool(
+        "lookup_asset",
+        {"asset_id": "A1"},
+        context=ToolUseContext(
+            session_id="same-session",
+            cache_namespace="run-1",
+        ),
+    )
+    second = harness.execute_tool(
+        "lookup_asset",
+        {"asset_id": "A1"},
+        context=ToolUseContext(
+            session_id="same-session",
+            cache_namespace="run-2",
+        ),
+    )
+
+    assert first.content == second.content
+    assert [event.event_type for event in harness.trace.snapshot()] == [
+        "tool_start",
+        "tool_end",
+        "tool_start",
+        "tool_end",
+    ]
+
+
+def test_timeout_worker_inherits_context_variables():
+    harness = make_harness()
+    marker = ContextVar("test_tool_workspace", default="missing")
+    tool = harness.tools.get("lookup_asset")
+    tool.handler = lambda args: marker.get()
+    token = marker.set("current-workspace")
+    try:
+        result = harness.execute_tool(
+            "lookup_asset",
+            {"asset_id": "A1"},
+            context=ToolUseContext(cache_namespace="context-test"),
+        )
+    finally:
+        marker.reset(token)
+
+    assert result.content == "current-workspace"
 
 
 def test_tool_pipeline_runs_post_hook_for_cached_result():

@@ -7,6 +7,7 @@ ToolExecutor 把模型一次返回的多个 tool call 划分成可并发和不�
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import TYPE_CHECKING, Any, Callable
 
 from ..runtime import RunState, ToolUseContext
@@ -64,6 +65,7 @@ class ToolExecutor:
                 session_id=state.session_id,
                 messages=state.messages,
                 confirmed=False,
+                cache_namespace=state.cache_namespace,
             ),
         )
         return [(tc, args, result)]
@@ -73,6 +75,7 @@ class ToolExecutor:
         with ThreadPoolExecutor(max_workers=min(len(batch), 4)) as pool:
             futures = {
                 pool.submit(
+                    copy_context().run,
                     self.harness.execute_tool,
                     tc.function.name,
                     args,
@@ -80,6 +83,7 @@ class ToolExecutor:
                         session_id=state.session_id,
                         messages=state.messages,
                         confirmed=False,
+                        cache_namespace=state.cache_namespace,
                     ),
                 ): (tc, args)
                 for tc, args in batch
