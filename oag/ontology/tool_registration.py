@@ -54,8 +54,8 @@ class OntologyToolRegistrar:
         obj_types = list(self.ontology.objects.keys())
 
         tools.register(ToolDef(
-            name="inspect", description="查看函数/对象/规则的完整定义",
-            parameters={"type": "object", "properties": {"name": {"type": "string", "description": "函数名、对象类型名或规则名"}}, "required": ["name"]},
+            name="inspect", description="查看函数、对象、规则、展示工具或策略的完整定义",
+            parameters={"type": "object", "properties": {"name": {"type": "string", "description": "函数名、对象类型名、规则名、展示工具名、事件类型或交互策略名"}}, "required": ["name"]},
             handler=lambda args: self.runtime.inspect(args.get("name", "")),
             category="inspect",
         ))

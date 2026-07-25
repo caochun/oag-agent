@@ -66,6 +66,9 @@ class OntologyRuntime:
     def build_full_context(self) -> str:
         return self._prompt_builder.build_full_context()
 
+    def build_event_prompt(self, event_type: str, event: dict) -> str:
+        return self._prompt_builder.build_event_prompt(event_type, event)
+
     def check_constraints(self, tool_name: str, args: dict) -> str | None:
         return self._validator.check_constraints(tool_name, args)
 

@@ -1,6 +1,6 @@
 """本体定义的显式检查器。
 
-inspect 工具使用这里的逻辑按需返回函数、对象或规则的完整定义。这是模型
+inspect 工具使用这里的逻辑按需返回函数、对象、规则或策略的完整定义。这是模型
 主动请求的显式查询，不是自动 prompt 注入。
 """
 
@@ -123,6 +123,30 @@ class OntologyInspector:
                     {"field": c.field, "operator": c.operator, "value": c.value, "result": c.result}
                     for c in rdef.conditions
                 ],
+            }, ensure_ascii=False, default=str)
+
+        presentation_tool = self.ontology.presentation_tools.get(target)
+        if presentation_tool:
+            return json.dumps({
+                "kind": "presentation_tool",
+                "name": target,
+                **presentation_tool.model_dump(),
+            }, ensure_ascii=False, default=str)
+
+        event_policy = self.ontology.event_policies.get(target)
+        if event_policy:
+            return json.dumps({
+                "kind": "event_policy",
+                "name": target,
+                **event_policy.model_dump(),
+            }, ensure_ascii=False, default=str)
+
+        interaction_policy = self.ontology.interaction_policies.get(target)
+        if interaction_policy:
+            return json.dumps({
+                "kind": "interaction_policy",
+                "name": target,
+                **interaction_policy.model_dump(),
             }, ensure_ascii=False, default=str)
 
         return json.dumps({"error": f"未找到: {target}"}, ensure_ascii=False)

@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from .registry import FunctionRegistry
 from .schema import Ontology
 
@@ -31,6 +34,7 @@ class OntologyPromptBuilder:
             self.build_base_system_prompt(),
             self.build_ontology_summary(),
             self.build_tool_usage_rules(),
+            self.build_interaction_policy_prompt(),
         ]
         if domain_context:
             sections.append(domain_context.strip())
@@ -112,6 +116,11 @@ class OntologyPromptBuilder:
             if self._is_tool_visible("inspect"):
                 parts.append("(这里只提供摘要。需要函数、对象或规则完整定义时，调用 inspect。)")
 
+        if self.ontology.presentation_tools:
+            parts.append("\n## 展示工具")
+            for name, tool in self.ontology.presentation_tools.items():
+                parts.append(f"- {name} [{tool.side_effect_scope}]: {tool.summary}")
+
         return "\n".join(parts)
 
     def build_tool_usage_rules(self) -> str:
@@ -151,6 +160,75 @@ class OntologyPromptBuilder:
 
         return "\n".join(parts)
 
+    def build_interaction_policy_prompt(self) -> str:
+        policies = [
+            (name, policy)
+            for name, policy in self.ontology.interaction_policies.items()
+            if policy.include_in_system_prompt and policy.instructions
+        ]
+        if not policies:
+            return ""
+        parts = ["## 领域交互策略"]
+        for name, policy in policies:
+            if policy.description:
+                parts.append(f"### {policy.description}")
+            elif len(policies) > 1:
+                parts.append(f"### {name}")
+            parts.extend(f"- {instruction}" for instruction in policy.instructions)
+        return "\n".join(parts)
+
+    def build_event_prompt(self, event_type: str, event: dict[str, Any]) -> str:
+        policy = self.ontology.event_policies.get(event_type)
+        if not policy:
+            raise KeyError(f"ontology event policy not found: {event_type}")
+
+        parts = [
+            "/no_think",
+            f"你正在作为{policy.role}接收 {event_type} 后台领域事件。",
+        ]
+        if policy.description:
+            parts.append(policy.description)
+        if policy.required_functions:
+            parts.append(
+                "必须调用以下函数：" + "、".join(policy.required_functions) + "。"
+            )
+        parts.extend(policy.instructions)
+
+        map_policy = policy.automatic_map
+        if map_policy.mode != "none" and map_policy.objects:
+            objects = [item.model_dump(exclude={"label"}) for item in map_policy.objects]
+            for item, configured in zip(map_policy.objects, objects):
+                if item.label:
+                    configured["label"] = item.label
+            map_args = json.dumps({"objects": objects}, ensure_ascii=False)
+            if map_policy.mode == "always":
+                prefix = "必须执行自动地图展示"
+            else:
+                prefix = "如果该事件需要在 GIS 上展示"
+            parts.append(
+                f"{prefix}，调用 {map_policy.tool}，且对象配置只能使用 {map_args}。"
+            )
+        if map_policy.other_objects == "on_user_request":
+            parts.append(
+                "分析结果中的其他业务对象只用于本次文字概况，不得在自动事件处理中展示；"
+                "只有用户在普通对话中明确请求时才可展示。"
+            )
+        elif map_policy.other_objects == "none":
+            parts.append("不得在本次事件处理中展示自动地图策略未声明的其他对象。")
+
+        if policy.forbidden_functions:
+            parts.append(
+                "禁止调用以下函数：" + "、".join(policy.forbidden_functions) + "。"
+            )
+        if policy.conclusion_fields:
+            parts.append(
+                "请用简短结论说明：" + "、".join(policy.conclusion_fields) + "。"
+            )
+        parts.append(
+            "原始事件如下：\n" + json.dumps(event, ensure_ascii=False, indent=2)
+        )
+        return "\n".join(parts)
+
     def build_full_context(self) -> str:
         parts: list[str] = []
 
@@ -164,7 +242,30 @@ class OntologyPromptBuilder:
             parts.append("## 对象完整定义")
             parts.extend(obj_parts)
 
+        presentation_parts = self._build_all_presentation_tool_details()
+        if presentation_parts:
+            parts.append("## 展示工具完整定义")
+            parts.extend(presentation_parts)
+
         return "\n\n".join(parts)
+
+    def _build_all_presentation_tool_details(self) -> list[str]:
+        details = []
+        for name, tool in self.ontology.presentation_tools.items():
+            lines = [f"### 展示工具: {name}"]
+            if tool.summary:
+                lines.append(f"摘要: {tool.summary}")
+            if tool.description:
+                lines.append(f"说明: {tool.description}")
+            if tool.usage_prompt:
+                lines.append(f"使用说明: {tool.usage_prompt}")
+            lines.append(f"副作用范围: {tool.side_effect_scope}")
+            lines.append(f"修改领域数据: {tool.mutates_domain}")
+            lines.append(f"对象范围: {tool.object_scope}")
+            if tool.allowed_objects:
+                lines.append(f"允许对象: {', '.join(tool.allowed_objects)}")
+            details.append("\n".join(lines))
+        return details
 
     def _build_all_function_details(self) -> list[str]:
         details: list[str] = []

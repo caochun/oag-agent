@@ -108,6 +108,52 @@ functions:
         description: 资产编号
 ```
 
+对象可通过 `display_name`、`aliases` 和 `countable` 声明面向用户的名称映射。
+领域级对话与后台事件策略也可以由 ontology 统一提供：
+
+```yaml
+interaction_policies:
+  user_chat:
+    include_in_system_prompt: true
+    instructions:
+      - 对象级结论必须来自确定性领域函数。
+    intents:
+      impact:
+        keywords: [受影响, 受淹]
+        tools: [analyze_impacts]
+
+presentation_tools:
+  ui_show_objects:
+    summary: 在前端展示领域对象
+    description: 返回声明式地图动作，不修改领域数据
+    usage_prompt: 用户明确要求地图展示时调用
+    side_effect_scope: frontend_map
+    mutates_domain: false
+    object_scope: mappable
+    requires_confirmation: false
+
+event_policies:
+  ResultGenerated:
+    role: 领域事件智能体
+    allowed_tools: [analyze_impacts, ui_show_objects]
+    required_functions: [analyze_impacts]
+    automatic_map:
+      mode: when_relevant
+      tool: ui_show_objects
+      objects:
+        - object_type: ResultCell
+          filters: {result_id: latest}
+      allowed_action_types: [apply_result]
+      other_objects: on_user_request
+```
+
+`required_functions` 和自动地图工具必须包含在 `allowed_tools` 中，自动地图工具还必须
+存在于 `presentation_tools`，否则 ontology 加载时会失败。展示工具的 handler 和参数
+Schema 仍由适配器代码绑定；ontology 负责名称、用途、模型使用说明、副作用和对象范围。
+事件 prompt 和运行时动作白名单应读取同一个 `event_policies` 定义，避免自然语言提示
+与执行约束漂移。策略引用的工具必须是内置工具、`functions`、`presentation_tools`，
+或在顶层 `runtime_tools` 中显式声明的外部运行时工具。
+
 `functions/__init__.py` 负责绑定 Python 实现：
 
 ```python
@@ -202,8 +248,9 @@ for event in agent.confirm_tool("demo", approved=True):
 - `base_system_prompt`：领域身份和领域说明。
 - `ontology_summary`：对象、关系、规则、工作流、函数摘要。
 - `tool_usage_rules`：通用工具选择规则。
+- `interaction_policies`：ontology 声明并标记为常驻的领域交互策略。
 - `runtime_context`：当前运行模式、审计、轮次限制、部署上下文等动态信息。
-- `append_system_prompt`：调用方追加的部署或业务策略。
+- `append_system_prompt`：调用方追加的部署级临时策略；稳定领域策略优先放入 ontology。
 
 默认情况下不会把完整函数和对象定义塞进 system prompt。模型需要详情时应调用
 `inspect` 工具。若要兼容旧行为，可以设置：
