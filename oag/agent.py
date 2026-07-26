@@ -60,6 +60,11 @@ class Agent:
     def has_pending(self, session_id: str) -> bool:
         return session_id in self._pending
 
+    def pending_tool_name(self, session_id: str) -> str | None:
+        """Return the tool currently waiting for this session's response."""
+        pending = self._pending.get(session_id)
+        return pending.tool_name if pending else None
+
     def confirm_tool(self, session_id: str, approved: bool,
                      answer: str | None = None) -> Generator[Event, None, None]:
         pending = self._pending.pop(session_id, None)
