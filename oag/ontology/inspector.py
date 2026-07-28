@@ -38,6 +38,8 @@ class OntologyInspector:
                 "depends_on": fdef.depends_on,
                 "hint": fdef.hint,
                 "function_type": fdef.function_type,
+                "timeout_seconds": fdef.timeout_seconds,
+                "concurrency_safe": fdef.concurrency_safe,
                 "writes_to": fdef.writes_to,
                 "involves_objects": fdef.involves_objects,
                 "preconditions": [

@@ -122,6 +122,8 @@ class FunctionDef(BaseModel):
     hint: str = ""
     params: dict[str, FunctionParam] = {}
     function_type: str = ""  # business / lookup / get
+    timeout_seconds: float | None = 30.0
+    concurrency_safe: bool | None = None
     writes_to: list[str] = []
     involves_objects: list[str] = []
     preconditions: list[Precondition] = []

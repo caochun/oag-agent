@@ -208,10 +208,15 @@ class OntologyToolRegistrar:
                 policy=ToolPolicy(
                     read_only=not has_writes,
                     requires_confirmation=has_writes or is_business,
-                    concurrency_safe=not has_writes,
+                    concurrency_safe=(
+                        not has_writes
+                        if fdef.concurrency_safe is None
+                        else fdef.concurrency_safe
+                    ),
                     worker_allowed=not (has_writes or is_business),
                     idempotent=not has_writes,
                     destructive=has_writes or is_business,
+                    timeout_seconds=fdef.timeout_seconds,
                 ),
             ))
 

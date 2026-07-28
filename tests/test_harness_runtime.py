@@ -171,6 +171,8 @@ def make_harness(config: HarnessConfig | None = None,
                 summary="Lookup an asset",
                 description="Lookup asset details",
                 function_type="get",
+                timeout_seconds=75,
+                concurrency_safe=False,
                 params={"asset_id": FunctionParam(type="str", description="Asset id")},
                 involves_objects=["Asset"],
             ),
@@ -329,6 +331,16 @@ def test_analysis_tools_are_opt_in():
     assert harness.tools.has("describe")
     assert harness.tools.has("pivot")
     assert harness.tools.has("distribution")
+
+
+def test_function_tool_uses_ontology_execution_policy():
+    harness = make_harness()
+
+    assert harness.tools.get("lookup_asset").policy.timeout_seconds == 75
+    assert harness.tools.get("lookup_asset").policy.concurrency_safe is False
+    details = json.loads(harness.execute_tool("inspect", {"name": "lookup_asset"}).content)
+    assert details["timeout_seconds"] == 75
+    assert details["concurrency_safe"] is False
 
 
 def test_function_param_types_map_to_json_schema_types():
