@@ -182,10 +182,17 @@ class OntologyPromptBuilder:
         if not policy:
             raise KeyError(f"ontology event policy not found: {event_type}")
 
+        event_display_name = policy.display_name or event_type
         parts = [
             "/no_think",
-            f"你正在作为{policy.role}接收 {event_type} 后台领域事件。",
+            f"你正在作为{policy.role}接收“{event_display_name}”后台领域事件。",
         ]
+        if policy.display_name:
+            parts.append(
+                f"该事件的技术类型标识是 {event_type}。面向用户的结论必须使用中文名称"
+                f"“{event_display_name}”称呼该事件；除非解释原始技术字段，否则不要用"
+                f" {event_type} 作为标题或正文中的事件名称。"
+            )
         if policy.description:
             parts.append(policy.description)
         if policy.required_functions:

@@ -223,6 +223,7 @@ class EventMapPolicyDef(BaseModel):
 
 
 class EventPolicyDef(BaseModel):
+    display_name: str = ""
     role: str = "领域智能体"
     description: str = ""
     allowed_tools: list[str] = []
