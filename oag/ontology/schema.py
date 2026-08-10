@@ -194,6 +194,7 @@ class PresentationToolDef(BaseModel):
     worker_allowed: bool = False
     idempotent: bool = False
     destructive: bool = False
+    wait_for_user: bool = False
     timeout_seconds: float = 5.0
 
     @model_validator(mode="after")

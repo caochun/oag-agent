@@ -27,6 +27,7 @@ from oag.ontology.schema import (
     ObjectSourceDef,
     ObjectTypeDef,
     Precondition,
+    PresentationToolDef,
     PropertyDef,
 )
 from oag.runtime.session_store import SessionStore
@@ -1306,6 +1307,98 @@ def test_query_loop_aggregates_streaming_tool_calls(monkeypatch):
     assert events[2].args == {"asset_id": "A1"}
     assert '"asset_id": "A1"' in events[3].result
     assert messages[2]["tool_calls"][0]["function"]["arguments"] == '{"asset_id":"A1"}'
+
+
+def test_query_loop_emits_structured_presentation_event(monkeypatch):
+    harness = make_harness()
+    harness.ontology.presentation_tools["ui_open_editor"] = PresentationToolDef(
+        summary="Open an editor in the frontend",
+        side_effect_scope="frontend_editor",
+    )
+    harness.tools.register(ToolDef(
+        name="ui_open_editor",
+        description="Open an editor",
+        parameters={
+            "type": "object",
+            "properties": {"record_id": {"type": "string"}},
+            "required": ["record_id"],
+        },
+        handler=lambda args: json.dumps({
+            "message": "Editor is ready",
+            "presentation": {
+                "kind": "editor",
+                "record_id": args["record_id"],
+            },
+        }),
+    ))
+    calls = []
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return make_response(tool_calls=[
+                make_full_tool_call(
+                    "ui_open_editor",
+                    "tool_1",
+                    '{"record_id":"A1"}',
+                ),
+            ])
+        return make_response(content="The editor is open.")
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Edit A1"}]
+
+    events = list(loop.run(RunState(messages=messages, session_id="s1", user_question="Edit A1")))
+
+    presentation = next(event for event in events if event.type == "presentation")
+    assert presentation.name == "ui_open_editor"
+    assert presentation.payload == {"kind": "editor", "record_id": "A1"}
+    assert any(event.type == "tool_result" for event in events)
+
+
+def test_presentation_handoff_ends_agent_turn_when_configured(monkeypatch):
+    harness = make_harness()
+    harness.ontology.presentation_tools["ui_open_editor"] = PresentationToolDef(
+        summary="Open an editor in the frontend",
+        side_effect_scope="frontend_editor",
+        wait_for_user=True,
+    )
+    harness.tools.register(ToolDef(
+        name="ui_open_editor",
+        description="Open an editor",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda args: json.dumps({
+            "presentation": {"kind": "editor"},
+        }),
+    ))
+    calls = []
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        calls.append(kwargs)
+        return make_response(tool_calls=[
+            make_full_tool_call("ui_open_editor", "tool_1", "{}"),
+        ])
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Edit"}]
+
+    events = list(loop.run(RunState(messages=messages, session_id="s1", user_question="Edit")))
+
+    assert len(calls) == 1
+    assert any(event.type == "presentation" for event in events)
+    assert messages[-1]["role"] == "tool"
 
 
 def test_confirmation_required_stops_before_later_tool_calls(monkeypatch):

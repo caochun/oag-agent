@@ -150,6 +150,9 @@ event_policies:
 `required_functions` 和自动地图工具必须包含在 `allowed_tools` 中，自动地图工具还必须
 存在于 `presentation_tools`，否则 ontology 加载时会失败。展示工具的 handler 和参数
 Schema 仍由适配器代码绑定；ontology 负责名称、用途、模型使用说明、副作用和对象范围。
+handler 如需驱动前端，应返回包含 `presentation` 对象的 JSON；主循环会额外产出
+`presentation` 事件，其中 `name` 是工具名、`payload` 是该对象。普通工具结果仍会追加到
+LLM 会话，前端不需要解析面向模型的结果文本。
 事件 prompt 和运行时动作白名单应读取同一个 `event_policies` 定义，避免自然语言提示
 与执行约束漂移。策略引用的工具必须是内置工具、`functions`、`presentation_tools`，
 或在顶层 `runtime_tools` 中显式声明的外部运行时工具。

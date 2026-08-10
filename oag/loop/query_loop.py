@@ -15,7 +15,7 @@ from openai import APIStatusError, OpenAI
 from .tool_executor import ToolExecutor
 from ..runtime.events import (
     CompactEvent, ConfirmationEvent, DebugEvent, Event, QuestionEvent,
-    ReasoningEvent, TextEvent, ToolCallEvent, ToolResultEvent,
+    PresentationEvent, ReasoningEvent, TextEvent, ToolCallEvent, ToolResultEvent,
 )
 from ..llm.retry import call_llm_with_retry
 from ..runtime import RunState
@@ -33,6 +33,12 @@ MAX_REASONING_CHARS = 5000
 class _ToolExecutionPaused(Exception):
     def __init__(self, events: list[Event]):
         super().__init__("tool execution paused")
+        self.events = events
+
+
+class _PresentationHandoff(Exception):
+    def __init__(self, events: list[Event]):
+        super().__init__("presentation handed off to frontend")
         self.events = events
 
 
@@ -163,6 +169,10 @@ class QueryLoop:
                         for event in paused.events:
                             yield event
                         return
+                    except _PresentationHandoff as handoff:
+                        for event in handoff.events:
+                            yield event
+                        return
                     executable_calls = []
                     yield ToolCallEvent(name=tc.function.name, args=args)
                     yield from self._handle_tool_result(state, messages, msg, index, tc, args, parse_error)
@@ -188,6 +198,10 @@ class QueryLoop:
                 yield from self._execute_tool_call_segment(state, messages, msg, executable_calls)
             except _ToolExecutionPaused as paused:
                 for event in paused.events:
+                    yield event
+                return
+            except _PresentationHandoff as handoff:
+                for event in handoff.events:
                     yield event
                 return
 
@@ -273,6 +287,8 @@ class QueryLoop:
                     break
         except _ToolExecutionPaused:
             raise _ToolExecutionPaused(pending_events)
+        except _PresentationHandoff:
+            raise _PresentationHandoff(pending_events)
         for event in pending_events:
             yield event
 
@@ -324,11 +340,39 @@ class QueryLoop:
             "content": result.content,
         })
 
+        presentation = self._presentation_payload(tc.function.name, result)
+        if presentation is not None:
+            yield PresentationEvent(
+                name=tc.function.name,
+                payload=presentation,
+            )
+            tool_definition = self.harness.ontology.presentation_tools.get(tc.function.name)
+            if tool_definition and tool_definition.wait_for_user:
+                for skipped in self._build_skipped_tool_calls(
+                    msg.tool_calls[index + 1:],
+                    reason="前一个展示工具已交给前端，本调用未执行",
+                ):
+                    messages.append({"role": "tool", **skipped})
+                raise _PresentationHandoff([])
+
         if result.blocked:
             messages.append({
                 "role": "user",
                 "content": f"[系统提示] 工具 {tc.function.name} 被阻止: {result.block_reason}",
             })
+
+    def _presentation_payload(self, tool_name: str,
+                              result: ToolResult) -> dict | None:
+        if result.blocked or tool_name not in self.harness.ontology.presentation_tools:
+            return None
+        try:
+            value = json.loads(result.raw_content or result.content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(value, dict):
+            return None
+        presentation = value.get("presentation")
+        return presentation if isinstance(presentation, dict) else None
 
     def _tool_result_preview_len(self, tool_name: str) -> int:
         return 5000 if tool_name == "dispatch_workers" else 200
@@ -565,13 +609,14 @@ class QueryLoop:
             )
         return parsed, None
 
-    def _build_skipped_tool_calls(self, tool_calls: list) -> list[dict]:
+    def _build_skipped_tool_calls(self, tool_calls: list,
+                                  reason: str = "前一个工具调用需要用户确认，本调用未执行") -> list[dict]:
         return [
             {
                 "tool_call_id": tc.id,
                 "content": json.dumps({
                     "skipped": True,
-                    "reason": "前一个工具调用需要用户确认，本调用未执行",
+                    "reason": reason,
                 }, ensure_ascii=False),
             }
             for tc in tool_calls
