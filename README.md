@@ -1,7 +1,7 @@
 # OAG Agent
 
-OAG Agent 是一个本体驱动的在线智能体运行时。它把业务领域定义为
-`ontology.yaml`，再将对象查询、规则执行、工作流推进、业务函数和用户确认
+OAG Agent 是一个本体驱动的在线智能体运行时。它直接加载 `ontology.yaml`，或从
+`DomainProvider` 获取领域最终提供的 `Ontology`，再将对象查询、规则执行、工作流推进、业务函数和用户确认
 统一封装为 LLM 可调用的工具。
 
 这个包本身定位为 Python runtime/library：调用方负责准备领域目录、OpenAI
@@ -29,7 +29,7 @@ uv run python -m compileall -q oag
 
 ## 领域目录
 
-`load_domain()` 读取一个领域目录，约定结构如下：
+`load_domain()` 默认读取下面这种兼容领域目录：
 
 ```text
 my_domain/
@@ -195,6 +195,56 @@ def register(registry, repository, ontology):
         ontology.functions["create_work_order"],
     )
 ```
+
+### 领域提供者协议
+
+当领域需要自行决定如何产生 Ontology 时，在目录中增加 `domain.yaml`：
+
+```text
+my_domain/
+  domain.yaml
+  provider.py
+  ...                    # provider 使用的文件由领域自行决定
+```
+
+```yaml
+schema: oag.domain.v1
+provider: provider:create_domain
+```
+
+工厂返回实现 `DomainProvider` 的对象：
+
+```python
+from oag.ontology.domain import DomainContext
+
+
+class Provider:
+    def load_ontology(self):
+        # 可以读取、生成或从外部获取，OAG 不关心产生方式。
+        return ontology
+
+    def register(self, context: DomainContext):
+        # 注册该 Ontology 所需的 adapter、resolver 和函数实现。
+        context.registry.register(...)
+
+
+def create_domain(domain_dir):
+    return Provider()
+```
+
+加载顺序固定为：
+
+```text
+创建 provider
+  -> provider.load_ontology()
+  -> 用返回的 Ontology 创建 Repository
+  -> provider.register(DomainContext)
+```
+
+`load_ontology()` 返回最终的 `Ontology`，不接收基础本体。它可以直接读取一个文件，也可以生成、合并或
+从外部服务取得本体；这些过程不属于 OAG 协议。`register()` 会收到同一个 Ontology 和基于它创建的
+Repository。OAG 只定义“提供本体、注册运行时”这一生命周期，不解释 provider 的私有文件。
+没有 `domain.yaml` 的既有领域仍通过 `functions.register(registry, repository, ontology)` 加载。
 
 ## 最小运行示例
 

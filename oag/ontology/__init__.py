@@ -5,6 +5,8 @@ prompt 构建、运行时验证、显式 inspect、工作流辅助和工具注�
 """
 
 __all__ = [
+    "DomainContext",
+    "DomainProvider",
     "DataExecutor",
     "FunctionRegistry",
     "Ontology",
@@ -17,6 +19,10 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    if name in {"DomainContext", "DomainProvider"}:
+        from .domain import DomainContext, DomainProvider
+
+        return {"DomainContext": DomainContext, "DomainProvider": DomainProvider}[name]
     if name == "DataExecutor":
         from .data_executor import DataExecutor
 
