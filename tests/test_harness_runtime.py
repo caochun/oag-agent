@@ -1308,6 +1308,77 @@ def test_query_loop_aggregates_streaming_tool_calls(monkeypatch):
     assert messages[2]["tool_calls"][0]["function"]["arguments"] == '{"asset_id":"A1"}'
 
 
+def test_query_loop_emits_presentation_event_from_tool_result(monkeypatch):
+    harness = make_harness()
+    harness.tools.register(ToolDef(
+        name="ui_open_form",
+        description="Open a frontend form",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda args: json.dumps({
+            "message": "form opened",
+            "presentation": {
+                "kind": "action_form",
+                "action": {"id": "register_customer"},
+            },
+        }),
+        category="ui",
+    ))
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        calls = kwargs["messages"]
+        if not any(message.get("role") == "tool" for message in calls):
+            return make_response(tool_calls=[
+                make_full_tool_call("ui_open_form", "tool_ui", "{}"),
+            ])
+        return make_response(content="The form is open.")
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Open form"}]
+    events = list(loop.run(RunState(messages=messages, session_id="s1", user_question="Open form")))
+
+    event_types = [event.type for event in events]
+    assert event_types[:5] == ["debug", "debug", "tool_call", "tool_result", "presentation"]
+    presentation = next(event for event in events if event.type == "presentation")
+    assert presentation.name == "ui_open_form"
+    assert presentation.payload["kind"] == "action_form"
+
+
+def test_query_loop_ignores_presentation_payload_from_non_ui_tool(monkeypatch):
+    harness = make_harness()
+    harness.tools.register(ToolDef(
+        name="ordinary_query",
+        description="Return ordinary domain data",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda args: json.dumps({"presentation": {"kind": "untrusted"}}),
+        category="query",
+    ))
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        if not any(message.get("role") == "tool" for message in kwargs["messages"]):
+            return make_response(tool_calls=[
+                make_full_tool_call("ordinary_query", "tool_query", "{}"),
+            ])
+        return make_response(content="Done.")
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Query"}]
+    events = list(loop.run(RunState(messages=messages, session_id="s1", user_question="Query")))
+
+    assert all(event.type != "presentation" for event in events)
+
+
 def test_confirmation_required_stops_before_later_tool_calls(monkeypatch):
     harness = make_harness(HarnessConfig(enable_write_confirmation=True))
     executed = []

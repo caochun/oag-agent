@@ -15,7 +15,7 @@ from openai import APIStatusError, OpenAI
 from .tool_executor import ToolExecutor
 from ..runtime.events import (
     CompactEvent, ConfirmationEvent, DebugEvent, Event, QuestionEvent,
-    ReasoningEvent, TextEvent, ToolCallEvent, ToolResultEvent,
+    PresentationEvent, ReasoningEvent, TextEvent, ToolCallEvent, ToolResultEvent,
 )
 from ..llm.retry import call_llm_with_retry
 from ..runtime import RunState
@@ -318,6 +318,13 @@ class QueryLoop:
             blocked=bool(result.blocked),
         )
 
+        presentation = self._presentation_payload(tc.function.name, result.content)
+        if presentation is not None:
+            yield PresentationEvent(
+                name=tc.function.name,
+                payload=presentation,
+            )
+
         messages.append({
             "role": "tool",
             "tool_call_id": tc.id,
@@ -329,6 +336,20 @@ class QueryLoop:
                 "role": "user",
                 "content": f"[系统提示] 工具 {tc.function.name} 被阻止: {result.block_reason}",
             })
+
+    def _presentation_payload(self, tool_name: str, content: str) -> dict | None:
+        """Extract the reserved payload only from a registered UI tool."""
+        tool = self.harness.tools.get(tool_name)
+        if tool is None or tool.category != "ui":
+            return None
+        try:
+            value = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(value, dict):
+            return None
+        presentation = value.get("presentation")
+        return presentation if isinstance(presentation, dict) else None
 
     def _tool_result_preview_len(self, tool_name: str) -> int:
         return 5000 if tool_name == "dispatch_workers" else 200

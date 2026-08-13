@@ -37,6 +37,15 @@ class ToolResultEvent(Event):
 
 
 @dataclass
+class PresentationEvent(Event):
+    """A tool returned a frontend presentation payload."""
+
+    type: str = "presentation"
+    name: str = ""
+    payload: dict = field(default_factory=dict)
+
+
+@dataclass
 class CompactEvent(Event):
     type: str = "compact"
     before_tokens: int = 0

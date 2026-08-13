@@ -12,7 +12,7 @@ OAG Agent 是一个本体驱动的在线智能体运行时。它直接加载 `on
 - 基于 `ontology.yaml` 构建领域对象、关系、规则、工作流和业务函数。
 - 自动注册查询、统计、搜索、规则、工作流、写入和业务函数工具。
 - 对需要确认的写操作、业务操作和用户提问提供确认流程。
-- 支持流式文本、reasoning 事件、工具调用事件和 SSE 事件转换。
+- 支持流式文本、reasoning、工具调用、展示动作和 SSE 事件转换。
 - 支持长上下文压缩、历史协议修复、工具输入 schema 校验。
 - 支持工具执行超时、Worker 策略限制、大工具结果落盘。
 - 支持通用工具错误守门，避免最终回答掩盖未恢复的工具错误。
@@ -150,6 +150,9 @@ event_policies:
 `required_functions` 和自动地图工具必须包含在 `allowed_tools` 中，自动地图工具还必须
 存在于 `presentation_tools`，否则 ontology 加载时会失败。展示工具的 handler 和参数
 Schema 仍由适配器代码绑定；ontology 负责名称、用途、模型使用说明、副作用和对象范围。
+展示工具的 JSON 结果可以包含顶层 `presentation` 对象。主对话运行时会保留普通 `tool_result`，并额外
+发出 `{type: presentation, name: 工具名, payload: presentation}` 事件；Web 或桌面调用方据此执行声明式
+界面动作，不需要从 Agent 文本中猜测业务意图。
 事件 prompt 和运行时动作白名单应读取同一个 `event_policies` 定义，避免自然语言提示
 与执行约束漂移。策略引用的工具必须是内置工具、`functions`、`presentation_tools`，
 或在顶层 `runtime_tools` 中显式声明的外部运行时工具。
