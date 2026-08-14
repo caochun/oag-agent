@@ -17,6 +17,7 @@ from ..runtime.events import (
     CompactEvent, ConfirmationEvent, DebugEvent, Event, QuestionEvent,
     PresentationEvent, ReasoningEvent, TextEvent, ToolCallEvent, ToolResultEvent,
 )
+from ..llm.dsml import DSMLTextFilter, extract_dsml_tool_calls
 from ..llm.retry import call_llm_with_retry
 from ..runtime import RunState
 from ..tools.pipeline import ToolResult
@@ -480,6 +481,18 @@ class QueryLoop:
     def _consume_llm_response(self, response) -> Generator[Event, None, SimpleNamespace]:
         if hasattr(response, "choices") and response.choices:
             msg = response.choices[0].message
+            visible_content, dsml_calls = extract_dsml_tool_calls(str(msg.content or ""))
+            if dsml_calls:
+                msg.content = visible_content
+                if not msg.tool_calls:
+                    msg.tool_calls = [
+                        SimpleNamespace(
+                            id=call.id,
+                            type="function",
+                            function=SimpleNamespace(name=call.name, arguments=call.arguments),
+                        )
+                        for call in dsml_calls
+                    ]
             msg.content_streamed = False
             yield self._build_response_debug_event(msg)
             if reasoning := self._extract_reasoning_from_message(msg):
@@ -489,6 +502,7 @@ class QueryLoop:
         content_parts: list[str] = []
         reasoning_chars = 0
         tool_call_parts: dict[int, dict] = {}
+        text_filter = DSMLTextFilter()
 
         for chunk in response:
             if not chunk.choices:
@@ -508,7 +522,8 @@ class QueryLoop:
 
             if delta.content:
                 content_parts.append(delta.content)
-                yield TextEvent(content=delta.content)
+                if visible_content := text_filter.feed(delta.content):
+                    yield TextEvent(content=visible_content)
 
             for tc_delta in delta.tool_calls or []:
                 index = tc_delta.index
@@ -526,21 +541,34 @@ class QueryLoop:
                     if tc_delta.function.arguments:
                         entry["arguments"].append(tc_delta.function.arguments)
 
+        if trailing_content := text_filter.flush():
+            yield TextEvent(content=trailing_content)
+        full_content = "".join(content_parts)
+        visible_content, dsml_calls = extract_dsml_tool_calls(full_content)
+        native_tool_calls = [
+            SimpleNamespace(
+                id=entry["id"],
+                type=entry["type"],
+                function=SimpleNamespace(
+                    name=entry["name"],
+                    arguments="".join(entry["arguments"]),
+                ),
+            )
+            for _, entry in sorted(tool_call_parts.items())
+            if entry["name"]
+        ]
+        fallback_tool_calls = [
+            SimpleNamespace(
+                id=call.id,
+                type="function",
+                function=SimpleNamespace(name=call.name, arguments=call.arguments),
+            )
+            for call in dsml_calls
+        ]
         msg = SimpleNamespace(
-            content="".join(content_parts),
-            content_streamed=bool(content_parts),
-            tool_calls=[
-                SimpleNamespace(
-                    id=entry["id"],
-                    type=entry["type"],
-                    function=SimpleNamespace(
-                        name=entry["name"],
-                        arguments="".join(entry["arguments"]),
-                    ),
-                )
-                for _, entry in sorted(tool_call_parts.items())
-                if entry["name"]
-            ] or None,
+            content=visible_content,
+            content_streamed=bool(visible_content),
+            tool_calls=native_tool_calls or fallback_tool_calls or None,
         )
         yield self._build_response_debug_event(msg)
         return msg

@@ -14,6 +14,7 @@ from oag.loop.query_loop import QueryLoop
 from oag.loop.tool_executor import ToolExecutor
 from oag.llm.context import ContextManager
 from oag.llm.context_usage import collect_context_usage
+from oag.llm.dsml import extract_dsml_tool_calls
 from oag.runtime.message_sanitizer import sanitize_messages
 from oag.runtime.tool_result_store import read_persisted_tool_result
 from oag.ontology.registry import FunctionRegistry
@@ -1307,6 +1308,72 @@ def test_query_loop_aggregates_streaming_tool_calls(monkeypatch):
     assert events[2].args == {"asset_id": "A1"}
     assert '"asset_id": "A1"' in events[3].result
     assert messages[2]["tool_calls"][0]["function"]["arguments"] == '{"asset_id":"A1"}'
+
+
+def test_query_loop_executes_dsml_tool_calls_without_exposing_control_markup(monkeypatch):
+    harness = make_harness()
+    harness.run_stop_check = lambda *args: ""
+    responses = iter([
+        iter([
+            make_stream_chunk(content="I will look it up.\n<｜｜DSML｜｜tool_"),
+            make_stream_chunk(content="calls>\n<｜｜DSML｜｜invoke name=\"lookup_asset\">"),
+            make_stream_chunk(content=(
+                "<｜｜DSML｜｜parameter name=\"asset_id\" string=\"true\">A1"
+                "</｜｜DSML｜｜parameter>\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>"
+            )),
+        ]),
+        iter([make_stream_chunk(content="Lookup complete.")]),
+    ])
+
+    monkeypatch.setattr(
+        "oag.loop.query_loop.call_llm_with_retry",
+        lambda *args, **kwargs: next(responses),
+    )
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Question?"}]
+    state = RunState(messages=messages, session_id="s1", user_question="Question?")
+
+    events = list(loop.run(state))
+
+    text = "".join(event.content for event in events if event.type == "text")
+    assert "I will look it up." in text
+    assert "Lookup complete." in text
+    assert "DSML" not in text
+    assert any(event.type == "tool_call" and event.name == "lookup_asset" for event in events)
+    assert messages[2]["content"] == "I will look it up."
+    assert messages[2]["tool_calls"][0]["function"] == {
+        "name": "lookup_asset",
+        "arguments": '{"asset_id":"A1"}',
+    }
+
+
+def test_dsml_parser_preserves_structured_html_tool_arguments():
+    content = """Continuing the document.
+<｜｜DSML｜｜tool_calls>
+<｜｜DSML｜｜invoke name="propose_document_changes">
+<｜｜DSML｜｜parameter name="operations" string="false">[{"type":"append_content","content_html":"<h3>3.4 部署方案</h3><ul><li>设备安装</li></ul>"}]</｜｜DSML｜｜parameter>
+<｜｜DSML｜｜parameter name="summary" string="true">补充部署方案</｜｜DSML｜｜parameter>
+</｜｜DSML｜｜invoke>
+</｜｜DSML｜｜tool_calls>"""
+
+    visible, calls = extract_dsml_tool_calls(content)
+
+    assert visible == "Continuing the document."
+    assert len(calls) == 1
+    assert calls[0].name == "propose_document_changes"
+    arguments = json.loads(calls[0].arguments)
+    assert arguments == {
+        "operations": [{
+            "type": "append_content",
+            "content_html": "<h3>3.4 部署方案</h3><ul><li>设备安装</li></ul>",
+        }],
+        "summary": "补充部署方案",
+    }
 
 
 def test_query_loop_emits_structured_presentation_event(monkeypatch):
