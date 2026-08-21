@@ -37,11 +37,10 @@ class OntologyInspector:
                 "group": fdef.group,
                 "depends_on": fdef.depends_on,
                 "hint": fdef.hint,
-                "function_type": fdef.function_type,
                 "timeout_seconds": fdef.timeout_seconds,
                 "concurrency_safe": fdef.concurrency_safe,
-                "writes_to": fdef.writes_to,
-                "involves_objects": fdef.involves_objects,
+                "reads_objects": fdef.reads_objects,
+                "reads_relations": fdef.reads_relations,
                 "preconditions": [
                     {
                         "object": p.object,
@@ -50,14 +49,6 @@ class OntologyInspector:
                         "value": p.value,
                     }
                     for p in fdef.preconditions
-                ],
-                "effects": [
-                    {
-                        "object": e.object,
-                        "field": e.field,
-                        "set_to": e.set_to,
-                    }
-                    for e in fdef.effects
                 ],
                 "temporal_constraints": [
                     {
@@ -71,6 +62,16 @@ class OntologyInspector:
                     p: {"type": d.type, "description": d.description, "default": d.default}
                     for p, d in fdef.params.items()
                 },
+            }, ensure_ascii=False, default=str)
+
+        action = self.ontology.actions.get(target)
+        if action:
+            if not action.user_visible or target in set(self.ontology.excluded_tools or []):
+                return json.dumps({"error": f"未找到: {target}"}, ensure_ascii=False)
+            return json.dumps({
+                "kind": "action",
+                "name": target,
+                **action.model_dump(),
             }, ensure_ascii=False, default=str)
 
         obj = self.ontology.objects.get(target)

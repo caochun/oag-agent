@@ -20,9 +20,11 @@ from oag.ontology.registry import FunctionRegistry
 from oag.runtime import PendingConfirmation, RunState, ToolUseContext
 from oag.runtime.hooks import HookResult
 from oag.ontology.schema import (
+    ActionDef,
+    ActionInputDef,
+    ActionSideEffectsDef,
     DataBindingDef,
     DataSourceDef,
-    Effect,
     FunctionDef,
     FunctionParam,
     Ontology,
@@ -37,6 +39,25 @@ from oag.tools.registry import ToolDef, ToolPolicy
 
 class DummyClient:
     pass
+
+
+class FakeActionRuntime:
+    def list_actions(self, context_id=""):
+        return {"context": None, "actions": [{"id": "create_work_order", "executable": True}]}
+
+    def prepare_action(self, action_id, context_id="", initial_inputs=None):
+        return {
+            "action": {"id": action_id, "name": "创建维修工单"},
+            "context": None,
+            "context_id": context_id,
+            "initial_inputs": initial_inputs or {},
+        }
+
+    def preview_action(self, action_id, inputs=None, context_id=""):
+        return {"valid": True, "preview_token": "preview-1"}
+
+    def execute_action(self, preview_token, reason="", actor="", channel=""):
+        return {"applied": True}
 
 
 class MemorySource:
@@ -129,7 +150,8 @@ def make_repository(ontology: Ontology, registry: FunctionRegistry) -> OntologyR
 
 
 def make_harness(config: HarnessConfig | None = None,
-                 tool_preferences: dict | None = None) -> Harness:
+                 tool_preferences: dict | None = None,
+                 include_actions: bool = False) -> Harness:
     ontology = Ontology(
         name="TestDomain",
         description="Test domain",
@@ -174,38 +196,30 @@ def make_harness(config: HarnessConfig | None = None,
             "lookup_asset": FunctionDef(
                 summary="Lookup an asset",
                 description="Lookup asset details",
-                function_type="get",
                 timeout_seconds=75,
                 concurrency_safe=False,
                 params={"asset_id": FunctionParam(type="str", description="Asset id")},
-                involves_objects=["Asset"],
+                reads_objects=["Asset"],
             ),
             "create_work_order": FunctionDef(
                 summary="Create a work order",
                 description="Create work order details",
                 usage_prompt="创建前必须确认 asset_id 指向真实资产，并说明写入影响。",
                 hint="Only create when user explicitly asks.",
-                function_type="business",
-                writes_to=["WorkOrder"],
-                involves_objects=["Asset", "WorkOrder"],
+                reads_objects=["Asset", "WorkOrder"],
                 params={"asset_id": FunctionParam(type="str", description="Asset id")},
                 preconditions=[
                     Precondition(object="Asset", field="asset_id", operator="exists"),
-                ],
-                effects=[
-                    Effect(object="WorkOrder", field="status", set_to="created"),
                 ],
             ),
             "create_audit_note": FunctionDef(
                 summary="Create an audit note",
                 description="Create append-only agent note",
-                function_type="business",
-                writes_to=["AuditNote"],
+                reads_objects=["AuditNote"],
                 params={"asset_id": FunctionParam(type="str", description="Asset id")},
             ),
             "set_asset_threshold": FunctionDef(
                 summary="Set asset threshold",
-                function_type="get",
                 params={
                     "asset_id": FunctionParam(type="str", description="Asset id"),
                     "threshold": FunctionParam(type="float", description="Threshold"),
@@ -213,8 +227,25 @@ def make_harness(config: HarnessConfig | None = None,
                 },
             ),
         },
+        actions={
+            "create_work_order": ActionDef(
+                display_name="创建维修工单",
+                description="为资产创建维修工单",
+                available_on=["Asset"],
+                context_input="asset_id",
+                inputs={
+                    "asset_id": ActionInputDef(
+                        display_name="资产", required=True, object_types=["Asset"],
+                    ),
+                },
+                side_effects=ActionSideEffectsDef(creates_objects=["WorkOrder"]),
+                confirmation="创建维修工单",
+            ),
+        } if include_actions else {},
     )
     registry = FunctionRegistry()
+    if include_actions:
+        registry.register_action_runtime(FakeActionRuntime())
     repository = make_repository(ontology, registry)
     repository.create_object("Asset", {"asset_id": "A1", "status": "ok"})
     registry.register(
@@ -309,7 +340,7 @@ def test_prompt_uses_summary_context_and_inspect_for_details():
     prompt = harness.build_system_prompt()
 
     assert "## 可用函数" in prompt
-    assert "- lookup_asset[get]: Lookup an asset" in prompt
+    assert "- lookup_asset: Lookup an asset" in prompt
     assert "## 函数完整定义" not in prompt
     assert "### 函数: lookup_asset" not in prompt
     assert "## 对象完整定义" not in prompt
@@ -320,7 +351,7 @@ def test_prompt_uses_summary_context_and_inspect_for_details():
 
     assert details["usage_prompt"] == "创建前必须确认 asset_id 指向真实资产，并说明写入影响。"
     assert details["preconditions"][0]["object"] == "Asset"
-    assert details["effects"][0]["set_to"] == "created"
+    assert details["reads_objects"] == ["Asset", "WorkOrder"]
 
 
 def test_analysis_tools_are_opt_in():
@@ -355,6 +386,23 @@ def test_function_param_types_map_to_json_schema_types():
     assert params["asset_id"]["type"] == "string"
     assert params["threshold"]["type"] == "number"
     assert params["enabled"]["type"] == "boolean"
+
+
+def test_action_catalog_registers_generic_discovery_and_form_tools():
+    harness = make_harness(include_actions=True)
+
+    assert harness.tools.has("get_available_actions")
+    form = harness.tools.get("ui_open_action_form")
+    assert form.parameters["properties"]["action_id"]["enum"] == ["create_work_order"]
+    result = json.loads(form.handler({
+        "action_id": "create_work_order",
+        "context_id": "A1",
+        "initial_inputs": {"asset_id": "A1"},
+    }))
+    assert result["presentation"]["kind"] == "action_form"
+    assert result["presentation"]["initial_inputs"] == {"asset_id": "A1"}
+    assert form.policy.read_only is True
+    assert form.policy.worker_allowed is False
 
 
 def test_function_param_schema_rejects_string_for_float():
@@ -531,7 +579,7 @@ def test_mutate_validation_still_runs_after_confirmation():
     assert "仅支持追加写入" in result.content
 
 
-def test_agent_generated_append_only_business_function_does_not_need_confirmation():
+def test_functions_are_always_read_only_and_do_not_need_confirmation():
     harness = make_harness(HarnessConfig(enable_write_confirmation=True))
 
     result = harness.execute_tool("create_audit_note", {"asset_id": "A1"})
@@ -541,13 +589,13 @@ def test_agent_generated_append_only_business_function_does_not_need_confirmatio
     assert json.loads(result.content)["note_id"] == "N1"
 
 
-def test_agent_generated_mutable_business_function_still_needs_confirmation():
+def test_function_read_only_policy_does_not_depend_on_returned_business_shape():
     harness = make_harness(HarnessConfig(enable_write_confirmation=True))
 
     result = harness.execute_tool("create_work_order", {"asset_id": "A1"})
 
-    assert result.blocked
-    assert result.needs_confirmation
+    assert not result.blocked
+    assert not result.needs_confirmation
 
 
 def test_worker_system_prompt_uses_summary_not_full_context():
@@ -577,8 +625,8 @@ def test_worker_context_blocks_confirmation_and_non_worker_tools():
         context=context,
     )
     write_fn_result = harness.execute_tool(
-        "create_work_order",
-        {"asset_id": "A1"},
+        "mutate",
+        {"operation": "create", "object_type": "WorkOrder", "data": {"order_id": "WO2"}},
         context=context,
     )
     read_fn_result = harness.execute_tool(
@@ -999,7 +1047,9 @@ def test_tool_executor_stops_before_later_calls_when_confirmation_needed():
     state = RunState(messages=[], session_id="s1", user_question="")
 
     results = executor.execute_tool_calls([
-        (make_tool_call("create_work_order", "t1"), {"asset_id": "A1"}),
+        (make_tool_call("mutate", "t1"), {
+            "operation": "create", "object_type": "WorkOrder", "data": {"order_id": "WO2"},
+        }),
         (make_tool_call("lookup_asset", "t2"), {"asset_id": "A1"}),
     ], state)
 
@@ -1270,7 +1320,10 @@ def test_confirmation_required_stops_before_later_tool_calls(monkeypatch):
 
     def fake_call_llm_with_retry(*args, **kwargs):
         return make_response(tool_calls=[
-            make_full_tool_call("create_work_order", "tool_1", '{"asset_id":"A1"}'),
+        make_full_tool_call(
+            "mutate", "tool_1",
+            '{"operation":"create","object_type":"WorkOrder","data":{"order_id":"WO2"}}',
+        ),
             make_full_tool_call("lookup_asset", "tool_2", '{"asset_id":"A1"}'),
         ])
 
@@ -1287,9 +1340,9 @@ def test_confirmation_required_stops_before_later_tool_calls(monkeypatch):
     events = list(loop.run(state))
 
     assert [event.type for event in events] == ["debug", "debug", "tool_call", "confirmation_required"]
-    assert events[2].name == "create_work_order"
-    assert events[2].args == {"asset_id": "A1"}
-    assert executed == ["create_work_order"]
+    assert events[2].name == "mutate"
+    assert events[2].args["object_type"] == "WorkOrder"
+    assert executed == ["mutate"]
     assert len(pending) == 1
     assert pending[0][6] == [{"tool_call_id": "tool_2", "content": '{"skipped": true, "reason": "前一个工具调用需要用户确认，本调用未执行"}'}]
     assert all(m.get("tool_call_id") != "tool_2" for m in messages)

@@ -90,27 +90,34 @@ objects:
 functions:
   lookup_asset:
     summary: 查询资产详情
-    function_type: get
-    involves_objects: [Asset]
+    reads_objects: [Asset]
     params:
       asset_id:
         type: str
         description: 资产编号
 
+actions:
   create_work_order:
-    summary: 创建维修工单
+    display_name: 创建维修工单
+    summary: 为指定资产创建工单
     description: 为指定资产创建工单
-    usage_prompt: |
-      只有在用户明确要求创建工单时调用。
-      调用前应确认 asset_id 指向真实资产，并说明会写入 WorkOrder。
-    function_type: business
-    writes_to: [WorkOrder]
-    involves_objects: [Asset, WorkOrder]
-    params:
+    available_on: [Asset]
+    context_input: asset_id
+    inputs:
       asset_id:
         type: str
-        description: 资产编号
+        display_name: 资产
+        object_types: [Asset]
+        required: true
+    side_effects:
+      creates_objects: [WorkOrder]
+    confirmation: 创建维修工单
+    idempotency: required
 ```
+
+`Function` 只描述无领域副作用的查询、计算和校验能力。会创建、修改或退役业务事实的
+能力必须建模为 `Action`，由领域注册的 `ActionRuntime` 负责准备表单、预览和执行；
+OAG 只读取公开副作用，不依赖领域内部的 ChangeSet 模板。
 
 对象可通过 `display_name`、`aliases` 和 `countable` 声明面向用户的名称映射。
 领域级对话与后台事件策略也可以由 ontology 统一提供：
@@ -168,20 +175,11 @@ def register(registry, repository, ontology):
     def lookup_asset(asset_id: str):
         return repository.get_object("Asset", asset_id) or {"error": "not found"}
 
-    def create_work_order(asset_id: str):
-        return repository.create_object("WorkOrder", {
-            "order_id": "WO-001",
-            "asset_id": asset_id,
-            "status": "created",
-        })
-
     registry.register("lookup_asset", lookup_asset, ontology.functions["lookup_asset"])
-    registry.register(
-        "create_work_order",
-        create_work_order,
-        ontology.functions["create_work_order"],
-    )
 ```
+
+领域的 `DomainProvider` 另行注册实现 `ActionRuntime` 协议的服务。该服务可以通过 Repository
+的写接口落库，但这些底层 CRUD 不作为 Function 暴露给 LLM。
 
 ### 领域提供者协议
 
@@ -463,10 +461,9 @@ adapter 只实现数据源真实支持的能力。Provider 需要向应用暴露
 
 ### ConfirmationFlow
 
-写操作、业务操作和 `ask_user` 可能需要暂停等待用户确认。确认策略由工具 policy、
-ontology 中的 `writes_to`、对象 `data_source` 和 `mutability` 共同决定；写入
-`agent_generated + append_only` 对象的新增产物可作为 Agent 中间产物直接执行，更新、
-删除、可变对象、人工/外部来源对象和未知写入目标仍会进入确认。`ConfirmationFlow` 负责：
+写工具和 `ask_user` 可能需要暂停等待用户确认。Function 始终按只读工具注册；业务
+Action 的实际写入通过 `ActionRuntime.execute_action` 进入领域审计和并发校验，不伪装成
+Function。通用工具是否确认由 `ToolPolicy` 决定。`ConfirmationFlow` 负责：
 
 - 处理用户批准或拒绝。
 - 为被拒绝工具写入 tool result，避免破坏 OpenAI tool-call 协议。

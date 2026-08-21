@@ -103,13 +103,23 @@ class OntologyPromptBuilder:
                          "不要一次规划所有步骤——看到结果后再决定。"
                          "如果某步结果显示应走分支路径，就走分支。")
 
+        action_lines = []
+        for name, action in self.ontology.actions.items():
+            if not action.user_visible or not self._is_tool_visible(name):
+                continue
+            scope = f" [适用于: {', '.join(action.available_on)}]" if action.available_on else ""
+            summary = (action.summary or action.description).strip().split(chr(10))[0]
+            action_lines.append(f"- {name} ({action.display_name}){scope}: {summary}")
+        if action_lines:
+            parts.append("\n## 可用业务操作")
+            parts.extend(action_lines)
+            parts.append("业务操作会改变领域状态；通过 ui_open_action_form 交给用户补充输入并确认。")
+
         fn_lines = []
         for name, fdef in self.registry.list_functions():
             if not self._is_function_visible(name, fdef):
                 continue
             fn_parts = [f"- {name}"]
-            if fdef.function_type:
-                fn_parts.append(f"[{fdef.function_type}]")
             fn_parts.append(f": {(fdef.summary or '').strip().split(chr(10))[0]}")
             fn_lines.append("".join(fn_parts))
         if fn_lines:
@@ -140,7 +150,9 @@ class OntologyPromptBuilder:
             parts.append("- 应用规则: 使用 apply_rule（确定性，不要自己推理）")
         if self._is_tool_visible("inspect"):
             parts.append("- 查看详情: 使用 inspect 获取函数/对象/规则的完整定义；不要假设摘要里没有出现的字段或约束")
-        parts.append("- 业务操作: 调用当前可用的注册业务函数")
+        if self.ontology.actions:
+            parts.append("- 业务操作: 不确定操作时调用 get_available_actions；确定后调用 ui_open_action_form")
+            parts.append("- Function 均为只读能力；Action 才能改变业务状态")
         if self._is_tool_visible("mutate"):
             parts.append("- 数据变更: 使用 mutate 创建/更新/删除对象实例（需用户确认）")
         if self._is_tool_visible("search"):
@@ -246,6 +258,11 @@ class OntologyPromptBuilder:
             parts.append("## 函数完整定义")
             parts.extend(fn_parts)
 
+        action_parts = self._build_all_action_details()
+        if action_parts:
+            parts.append("## 业务操作完整定义")
+            parts.extend(action_parts)
+
         obj_parts = self._build_all_object_details()
         if obj_parts:
             parts.append("## 对象完整定义")
@@ -303,12 +320,6 @@ class OntologyPromptBuilder:
                     for p in fdef.preconditions
                 )
                 lines.append(f"前置条件: {reqs}")
-            if fdef.effects:
-                effs = "; ".join(
-                    f"{e.object}.{e.field} -> {e.set_to}"
-                    for e in fdef.effects
-                )
-                lines.append(f"执行效果: {effs}")
             if fdef.temporal_constraints:
                 slas = "; ".join(
                     f"{tc.sla}({tc.deadline})" if tc.deadline else tc.sla
@@ -317,11 +328,46 @@ class OntologyPromptBuilder:
                 )
                 if slas:
                     lines.append(f"时间约束: {slas}")
-            if fdef.writes_to:
-                lines.append(f"写入对象: {', '.join(fdef.writes_to)}")
-            if fdef.involves_objects:
-                lines.append(f"涉及对象: {', '.join(fdef.involves_objects)}")
+            if fdef.reads_objects:
+                lines.append(f"读取对象: {', '.join(fdef.reads_objects)}")
+            if fdef.reads_relations:
+                lines.append(f"读取关系: {', '.join(fdef.reads_relations)}")
 
+            details.append("\n".join(lines))
+        return details
+
+    def _build_all_action_details(self) -> list[str]:
+        details: list[str] = []
+        for action_name, action in self.ontology.actions.items():
+            if not action.user_visible or not self._is_tool_visible(action_name):
+                continue
+            lines = [f"### 业务操作: {action_name} ({action.display_name})"]
+            if action.description:
+                lines.append(f"说明: {action.description.strip()}")
+            if action.available_on:
+                lines.append(f"适用对象: {', '.join(action.available_on)}")
+            if action.inputs:
+                inputs = ", ".join(
+                    f"{name}({definition.type}{'*' if definition.required else ''})"
+                    for name, definition in action.inputs.items()
+                )
+                lines.append(f"输入: {inputs}")
+            effects = action.side_effects
+            effect_parts = []
+            for label, values in (
+                ("创建对象", effects.creates_objects),
+                ("更新对象", effects.updates_objects),
+                ("退役对象", effects.retires_objects),
+                ("创建关系", effects.creates_relations),
+                ("更新关系", effects.updates_relations),
+                ("退役关系", effects.retires_relations),
+            ):
+                if values:
+                    effect_parts.append(f"{label}: {', '.join(values)}")
+            if effect_parts:
+                lines.append("公开副作用: " + "; ".join(effect_parts))
+            if action.confirmation:
+                lines.append(f"确认说明: {action.confirmation}")
             details.append("\n".join(lines))
         return details
 

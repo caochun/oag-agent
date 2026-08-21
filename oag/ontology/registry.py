@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
+from .action_runtime import ActionRuntime
 from .schema import FunctionDef
 
 
@@ -19,6 +20,7 @@ class FunctionRegistry:
         self._executed: set[str] = set()
         self._services: dict[str, Any] = {}
         self._source_adapter_factories: dict[str, Callable] = {}
+        self._action_runtime: ActionRuntime | None = None
 
     def register(self, name: str, fn: Callable, definition: FunctionDef | None = None):
         self._functions[name] = fn
@@ -68,6 +70,12 @@ class FunctionRegistry:
 
     def get_source_adapter_factory(self, source_type: str) -> Callable | None:
         return self._source_adapter_factories.get(source_type)
+
+    def register_action_runtime(self, runtime: ActionRuntime) -> None:
+        self._action_runtime = runtime
+
+    def get_action_runtime(self) -> ActionRuntime | None:
+        return self._action_runtime
 
     def call_as_tool(self, name: str, args: dict) -> str:
         try:

@@ -101,6 +101,41 @@ class OntologyRepository:
     def get_object(self, object_type: str, id_value: Any) -> dict | None:
         return self._get_record("object", object_type, id_value)
 
+    def query_all_objects(self, filters: dict[str, Any] | None = None,
+                          limit: int | None = None) -> list[dict]:
+        """Query every concrete object type without reintroducing Object alias."""
+        rows: list[dict] = []
+        for object_type in self.ontology.objects:
+            if object_type in {"Object"}:
+                continue
+            remaining = None if limit is None else max(0, limit - len(rows))
+            if remaining == 0:
+                break
+            rows.extend(self.query_objects(object_type, filters, remaining))
+        return rows if limit is None else rows[:limit]
+
+    def query_all_relations(self, filters: dict[str, Any] | None = None,
+                            limit: int | None = None) -> list[dict]:
+        """Query every concrete relation type without reintroducing Relation alias."""
+        rows: list[dict] = []
+        for relation_type in self.ontology.relations:
+            if relation_type in {"Relation"}:
+                continue
+            remaining = None if limit is None else max(0, limit - len(rows))
+            if remaining == 0:
+                break
+            rows.extend(self.query_relations(relation_type, filters, limit=remaining))
+        return rows if limit is None else rows[:limit]
+
+    def get_object_any(self, id_value: Any) -> dict | None:
+        for object_type in self.ontology.objects:
+            if object_type == "Object":
+                continue
+            record = self.get_object(object_type, id_value)
+            if record is not None:
+                return record
+        return None
+
     def query_relations(
         self,
         relation_type: str,

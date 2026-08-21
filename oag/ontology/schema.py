@@ -31,14 +31,19 @@ STANDARD_RUNTIME_TOOLS = frozenset({
     "ask_user",
     "read_tool_result",
     "dispatch_workers",
+    "get_available_actions",
+    "ui_open_action_form",
 })
 
 
 class PropertyDef(BaseModel):
     type: str = "str"
     required: bool = False
+    display_name: str = ""
     description: str = ""
     default: Any = None
+    deprecated: bool = False
+    aliases: list[str] = []
 
 
 class ObjectConstraint(BaseModel):
@@ -86,6 +91,7 @@ class ObjectTypeDef(BaseModel):
     constraints: list[ObjectConstraint] = []
     data_source: str = ""  # external_api / agent_generated / human_confirmed
     mutability: str = ""  # read_only / append_only / mutable
+    deprecated: bool = False
 
 
 class RelationTypeDef(BaseModel):
@@ -105,6 +111,9 @@ class RelationTypeDef(BaseModel):
     binding: DataBindingDef | None = None
     data_source: str = ""
     mutability: str = ""
+    aliases: list[str] = []
+    deprecated: bool = False
+    acyclic: bool = False
 
 
 class FunctionParam(BaseModel):
@@ -121,12 +130,6 @@ class Precondition(BaseModel):
     value_from_param: str = ""
 
 
-class Effect(BaseModel):
-    object: str
-    field: str
-    set_to: Any
-
-
 class TemporalConstraint(BaseModel):
     when: dict[str, str] = {}
     deadline: str = ""
@@ -134,6 +137,10 @@ class TemporalConstraint(BaseModel):
 
 
 class FunctionDef(BaseModel):
+    """A side-effect-free domain capability exposed as an agent tool."""
+
+    model_config = ConfigDict(extra="forbid")
+
     description: str = ""
     summary: str = ""
     usage_prompt: str = ""
@@ -142,14 +149,59 @@ class FunctionDef(BaseModel):
     depends_on: list[str] = []
     hint: str = ""
     params: dict[str, FunctionParam] = {}
-    function_type: str = ""  # business / lookup / get
     timeout_seconds: float | None = 30.0
     concurrency_safe: bool | None = None
-    writes_to: list[str] = []
-    involves_objects: list[str] = []
+    reads_objects: list[str] = []
+    reads_relations: list[str] = []
     preconditions: list[Precondition] = []
-    effects: list[Effect] = []
     temporal_constraints: list[TemporalConstraint] = []
+
+
+class ActionInputDef(BaseModel):
+    """Public input contract for a state-changing domain Action."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str = ""
+    description: str = ""
+    type: str = "str"
+    required: bool = False
+    default: Any = None
+    object_types: list[str] = []
+    options: list[Any] = []
+
+
+class ActionSideEffectsDef(BaseModel):
+    """Public side-effect summary; execution templates remain domain-private."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    creates_objects: list[str] = []
+    updates_objects: list[str] = []
+    retires_objects: list[str] = []
+    creates_relations: list[str] = []
+    updates_relations: list[str] = []
+    retires_relations: list[str] = []
+
+
+class ActionDef(BaseModel):
+    """A modeled business operation that may change domain state."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str
+    description: str = ""
+    summary: str = ""
+    usage_prompt: str = ""
+    icon: str = ""
+    user_visible: bool = True
+    available_on: list[str] = []
+    context_input: str = ""
+    inputs: dict[str, ActionInputDef] = {}
+    preconditions: list[dict[str, Any]] = []
+    side_effects: ActionSideEffectsDef = ActionSideEffectsDef()
+    confirmation: str = ""
+    idempotency: Literal["required", "optional", "none"] = "required"
 
 
 class RuleCondition(BaseModel):
@@ -216,6 +268,7 @@ class PresentationToolDef(BaseModel):
     idempotent: bool = False
     destructive: bool = False
     timeout_seconds: float = 5.0
+    wait_for_user: bool = False
 
     @model_validator(mode="after")
     def validate_presentation_scope(self):
@@ -292,6 +345,7 @@ class Ontology(BaseModel):
     objects: dict[str, ObjectTypeDef] = {}
     relations: dict[str, RelationTypeDef] = {}
     functions: dict[str, FunctionDef] = {}
+    actions: dict[str, ActionDef] = {}
     rules: dict[str, RuleDef] = {}
     workflows: dict[str, WorkflowDef] = {}
     interaction_policies: dict[str, InteractionPolicyDef] = {}
@@ -311,6 +365,44 @@ class Ontology(BaseModel):
                 unknown = sorted(unknown_from | unknown_to)
                 raise ValueError(
                     f"relation {name} references unknown objects: {', '.join(unknown)}"
+                )
+        for name, action in self.actions.items():
+            unknown_context = set(action.available_on) - known_objects - {"*"}
+            unknown_inputs = {
+                object_type
+                for input_definition in action.inputs.values()
+                for object_type in input_definition.object_types
+                if object_type not in known_objects
+            }
+            effects = action.side_effects
+            unknown_effect_objects = (
+                set(effects.creates_objects)
+                | set(effects.updates_objects)
+                | set(effects.retires_objects)
+            ) - known_objects
+            unknown_effect_relations = (
+                set(effects.creates_relations)
+                | set(effects.updates_relations)
+                | set(effects.retires_relations)
+            ) - set(self.relations)
+            unknown = (
+                unknown_context
+                | unknown_inputs
+                | unknown_effect_objects
+                | unknown_effect_relations
+            )
+            if unknown:
+                raise ValueError(
+                    f"action {name} references unknown ontology types: "
+                    + ", ".join(sorted(unknown))
+                )
+        for name, function in self.functions.items():
+            unknown_objects = set(function.reads_objects) - known_objects
+            unknown_relations = set(function.reads_relations) - set(self.relations)
+            if unknown_objects or unknown_relations:
+                raise ValueError(
+                    f"function {name} references unknown ontology types: "
+                    + ", ".join(sorted(unknown_objects | unknown_relations))
                 )
         for tool_name, tool in self.presentation_tools.items():
             unknown_objects = set(tool.allowed_objects) - set(self.objects)
@@ -352,6 +444,7 @@ class Ontology(BaseModel):
             set(STANDARD_RUNTIME_TOOLS)
             | set(self.runtime_tools)
             | set(self.functions)
+            | ({"get_available_actions", "ui_open_action_form"} if self.actions else set())
             | set(self.presentation_tools)
         )
         for event_type, policy in self.event_policies.items():

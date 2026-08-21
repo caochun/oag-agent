@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Protocol
 
 from .data_executor import DataExecutor
@@ -55,8 +56,8 @@ class OntologyToolRegistrar:
         relation_types = list(self.ontology.relations.keys())
 
         tools.register(ToolDef(
-            name="inspect", description="查看函数、对象、规则、展示工具或策略的完整定义",
-            parameters={"type": "object", "properties": {"name": {"type": "string", "description": "函数名、对象类型名、规则名、展示工具名、事件类型或交互策略名"}}, "required": ["name"]},
+            name="inspect", description="查看函数、业务操作、对象、规则、展示工具或策略的完整定义",
+            parameters={"type": "object", "properties": {"name": {"type": "string", "description": "函数名、Action 名、对象类型名、规则名、展示工具名、事件类型或交互策略名"}}, "required": ["name"]},
             handler=lambda args: self.runtime.inspect(args.get("name", "")),
             category="inspect",
         ))
@@ -194,6 +195,8 @@ class OntologyToolRegistrar:
                 category="rule",
             ))
 
+        self._register_action_tools(tools)
+
         for name, fdef in self.registry.list_functions():
             if not fdef:
                 continue
@@ -207,8 +210,6 @@ class OntologyToolRegistrar:
                 if pdef.default is None:
                     required.append(pname)
 
-            has_writes = bool(fdef.writes_to)
-            is_business = fdef.function_type == "business"
             fn_name = name
             tools.register(ToolDef(
                 name=fn_name,
@@ -216,24 +217,123 @@ class OntologyToolRegistrar:
                 parameters={"type": "object", "properties": props, "required": required},
                 handler=lambda args, _n=fn_name: data.execute(_n, args),
                 usage_prompt=fdef.usage_prompt or fdef.hint,
-                category="action" if has_writes else "query",
-                is_read_only=not has_writes,
-                requires_confirmation=has_writes or is_business,
+                category="query",
+                is_read_only=True,
+                requires_confirmation=False,
                 max_result_chars=12000,
                 policy=ToolPolicy(
-                    read_only=not has_writes,
-                    requires_confirmation=has_writes or is_business,
+                    read_only=True,
+                    requires_confirmation=False,
                     concurrency_safe=(
-                        not has_writes
-                        if fdef.concurrency_safe is None
-                        else fdef.concurrency_safe
+                        True if fdef.concurrency_safe is None else fdef.concurrency_safe
                     ),
-                    worker_allowed=not (has_writes or is_business),
-                    idempotent=not has_writes,
-                    destructive=has_writes or is_business,
+                    worker_allowed=True,
+                    idempotent=True,
+                    destructive=False,
                     timeout_seconds=fdef.timeout_seconds,
                 ),
             ))
+
+    def _register_action_tools(self, tools: ToolRegistry) -> None:
+        action_runtime = self.registry.get_action_runtime()
+        if not self.ontology.actions or action_runtime is None:
+            return
+
+        action_ids = [
+            action_id
+            for action_id, definition in self.ontology.actions.items()
+            if definition.user_visible
+        ]
+        if not action_ids:
+            return
+        catalog = "；".join(
+            f"{action_id}={definition.display_name}"
+            for action_id, definition in self.ontology.actions.items()
+            if definition.user_visible
+        )
+        tools.register(ToolDef(
+            name="get_available_actions",
+            description="获取当前上下文允许执行的模型化业务操作及其前置条件状态。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "context_id": {
+                        "type": "string",
+                        "description": "可选的当前业务对象 ID",
+                    },
+                },
+                "required": [],
+            },
+            handler=lambda args: json.dumps(
+                action_runtime.list_actions(str(args.get("context_id", ""))),
+                ensure_ascii=False,
+                default=str,
+            ),
+            category="query",
+        ))
+
+        presentation = self.ontology.presentation_tools.get("ui_open_action_form")
+        description = (
+            presentation.description
+            if presentation
+            else "在前端打开模型驱动的业务操作表单，不执行业务数据变更。"
+        )
+        tools.register(ToolDef(
+            name="ui_open_action_form",
+            description=f"{description.strip()}\n\n当前可用 action_id：{catalog}",
+            usage_prompt=presentation.usage_prompt if presentation else "",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action_id": {
+                        "type": "string",
+                        "enum": action_ids,
+                        "description": "领域本体定义的业务操作 ID",
+                    },
+                    "context_id": {
+                        "type": "string",
+                        "description": "操作依赖当前对象时提供其 ID",
+                    },
+                    "initial_inputs": {
+                        "type": "object",
+                        "description": "用户已经明确给出的可选预填值",
+                    },
+                },
+                "required": ["action_id"],
+            },
+            handler=lambda args: self._open_action_form(action_runtime, args),
+            category=presentation.category if presentation else "ui",
+            max_result_chars=2000,
+            policy=ToolPolicy(
+                read_only=True,
+                requires_confirmation=False,
+                concurrency_safe=False,
+                worker_allowed=False,
+                idempotent=False,
+                destructive=False,
+                timeout_seconds=presentation.timeout_seconds if presentation else 5.0,
+            ),
+        ))
+
+    @staticmethod
+    def _open_action_form(action_runtime, args: dict) -> str:
+        try:
+            prepared = action_runtime.prepare_action(
+                action_id=str(args.get("action_id", "")),
+                context_id=str(args.get("context_id", "")),
+                initial_inputs=args.get("initial_inputs") or {},
+            )
+        except Exception as exc:
+            return json.dumps({
+                "error": "无法打开业务操作表单",
+                "details": str(exc),
+                "errors": getattr(exc, "errors", []),
+            }, ensure_ascii=False)
+        action = prepared.get("action") or {}
+        return json.dumps({
+            "message": f"已向用户打开{action.get('name', '业务操作')}表单，等待用户填写并确认。",
+            "presentation": {"kind": "action_form", **prepared},
+        }, ensure_ascii=False, default=str)
 
     def _generic_search_description(self) -> str:
         description = "跨对象类型全文搜索。在所有（或指定）对象类型的文本字段中搜索关键词"
