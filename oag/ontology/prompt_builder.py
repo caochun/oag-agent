@@ -64,16 +64,18 @@ class OntologyPromptBuilder:
             suffix = f" | {' | '.join(extras)}" if extras else ""
             parts.append(f"- {name}{kind_label}: {line}{suffix}")
 
-        if self.ontology.links:
-            parts.append("\n## 关系")
-            for lname, ldef in self.ontology.links.items():
-                extras = []
-                if ldef.link_type != "contains":
-                    extras.append(ldef.link_type)
-                if ldef.cardinality:
-                    extras.append(ldef.cardinality)
-                suffix = f" [{', '.join(extras)}]" if extras else ""
-                parts.append(f"- {lname}: {ldef.source} → {ldef.target}{suffix}")
+        if self.ontology.relations:
+            parts.append("\n## 可用关系")
+            for name, relation in self.ontology.relations.items():
+                endpoints = []
+                if relation.from_types:
+                    endpoints.append("from=" + ",".join(relation.from_types))
+                if relation.to_types:
+                    endpoints.append("to=" + ",".join(relation.to_types))
+                suffix = f" [{'; '.join(endpoints)}]" if endpoints else ""
+                parts.append(
+                    f"- {name}: {(relation.summary or relation.description).strip().split(chr(10))[0]}{suffix}"
+                )
 
         if self.ontology.rules:
             parts.append("\n## 可用规则（确定性，无需推理）")
@@ -127,7 +129,7 @@ class OntologyPromptBuilder:
         parts = []
         parts.append("\n## 工具使用规则")
         query_tools = [
-            name for name in ("query", "count", "query_links")
+            name for name in ("query", "count", "query_relations")
             if self._is_tool_visible(name)
         ]
         if query_tools:
@@ -335,13 +337,8 @@ class OntologyPromptBuilder:
                 lines.append(f"可变性: {obj_def.mutability}")
             if obj_def.data_source:
                 lines.append(f"数据来源: {obj_def.data_source}")
-            if obj_def.source:
-                source_bits = [f"type={obj_def.source.type or 'table'}"]
-                if obj_def.source.resolver:
-                    source_bits.append(f"resolver={obj_def.source.resolver}")
-                if obj_def.source.table:
-                    source_bits.append(f"table={obj_def.source.table}")
-                lines.append(f"数据访问: {', '.join(source_bits)}")
+            if obj_def.binding:
+                lines.append(f"数据访问: {obj_def.binding.source}")
             if obj_def.excluded_functions:
                 lines.append(f"不可调用: {', '.join(obj_def.excluded_functions)}")
             if obj_def.status_transitions:

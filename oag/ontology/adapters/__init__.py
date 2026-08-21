@@ -1,6 +1,5 @@
-"""Built-in ontology object data adapters."""
+"""Built-in ontology data-source adapters."""
 
-from .json_file import JsonFileAdapter
-from .sqlite_table import SqliteTableAdapter
+from .sqlite_graph import SqlitePropertyGraphSource
 
-__all__ = ["JsonFileAdapter", "SqliteTableAdapter"]
+__all__ = ["SqlitePropertyGraphSource"]

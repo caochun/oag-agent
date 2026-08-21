@@ -30,7 +30,7 @@ TOOL_ALLOWLIST: dict[str, set[str]] = {
              "lookup_bridge_type", "inspect", "query"},
     "dispatch": {"dispatch_resources", "get_depots_in_range", "get_rescue_teams_in_range",
                  "get_equipment_by_depot", "get_material_by_depot", "inspect", "query"},
-    "report": {"generate_event_report", "query", "query_links", "inspect"},
+    "report": {"generate_event_report", "query", "query_relations", "inspect"},
 }
 
 TASK_KEYWORDS: list[tuple[str, str]] = [

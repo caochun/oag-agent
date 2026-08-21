@@ -14,9 +14,11 @@ from oag.ontology.schema import Ontology
 def make_policy_ontology() -> Ontology:
     return Ontology.model_validate({
         "name": "PolicyDomain",
+        "data_sources": {"memory": {"type": "memory"}},
         "objects": {
             "ResultCell": {
                 "summary": "结果单元",
+                "binding": {"source": "memory"},
             },
         },
         "functions": {
@@ -120,7 +122,8 @@ def test_event_policy_rejects_unknown_presentation_tool():
     with pytest.raises(ValidationError, match="unknown presentation tool"):
         Ontology.model_validate({
             "name": "InvalidPresentationDomain",
-            "objects": {"ResultCell": {"summary": "结果单元"}},
+            "data_sources": {"memory": {"type": "memory"}},
+            "objects": {"ResultCell": {"summary": "结果单元", "binding": {"source": "memory"}}},
             "functions": {"analyze": {"summary": "分析结果"}},
             "event_policies": {
                 "ResultGenerated": {

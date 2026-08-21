@@ -13,12 +13,12 @@ from typing import Any
 import pandas as pd
 
 from .registry import FunctionRegistry
-from .repository import ObjectRepository
+from .repository import OntologyRepository
 
 
 class DataExecutor:
 
-    def __init__(self, repository: ObjectRepository, registry: FunctionRegistry):
+    def __init__(self, repository: OntologyRepository, registry: FunctionRegistry):
         self.store = repository
         self.registry = registry
 
@@ -26,24 +26,33 @@ class DataExecutor:
         try:
             # 内置数据工具在这里处理；未匹配时再尝试调用领域函数注册表。
             if name == "query":
-                rows = self.store.query(
+                rows = self.store.query_objects(
                     args["object_type"], args.get("filters"),
                     args.get("limit"), args.get("order_by"), args.get("offset"),
                 )
                 if not rows:
-                    total = self.store.count(args["object_type"])
+                    total = self.store.count_objects(args["object_type"])
                     if total == 0:
                         return json.dumps({"results": [], "note": f"{args['object_type']} 当前没有数据。"}, ensure_ascii=False)
                     return json.dumps({"results": [], "note": f"未找到匹配记录（共 {total} 条）。"}, ensure_ascii=False)
                 return json.dumps(rows, ensure_ascii=False, default=str)
 
             if name == "count":
-                n = self.store.count(args["object_type"], args.get("filters"))
+                n = self.store.count_objects(
+                    args["object_type"], args.get("filters"),
+                )
                 return json.dumps({"count": n}, ensure_ascii=False)
 
-            if name == "query_links":
-                rows = self.store.query_links(
-                    args["source_type"], args["source_id"], args["link_name"],
+            if name == "query_relations":
+                rows = self.store.query_relations(
+                    args["relation_type"],
+                    args.get("filters"),
+                    from_id=args.get("from_id"),
+                    to_id=args.get("to_id"),
+                    direction=args.get("direction", "out"),
+                    limit=args.get("limit"),
+                    order_by=args.get("order_by"),
+                    offset=args.get("offset"),
                 )
                 return json.dumps(rows, ensure_ascii=False, default=str)
 
@@ -88,11 +97,11 @@ class DataExecutor:
         object_type = args["object_type"]
 
         if operation == "create":
-            result = self.store.insert_record(object_type, args.get("data", {}))
+            result = self.store.create_object(object_type, args.get("data", {}))
         elif operation == "update":
-            result = self.store.update_record(object_type, args["object_id"], args.get("data", {}))
+            result = self.store.update_object(object_type, args["object_id"], args.get("data", {}))
         else:
-            result = self.store.delete_record(object_type, args["object_id"])
+            result = self.store.retire_object(object_type, args["object_id"])
 
         return json.dumps(result, ensure_ascii=False, default=str)
 
@@ -108,7 +117,7 @@ class DataExecutor:
     # ------------------------------------------------------------------
 
     def _describe(self, object_type: str, column: str | None = None) -> dict:
-        rows = self.store.query(object_type)
+        rows = self.store.query_objects(object_type)
         if not rows:
             return {"error": f"{object_type} has no data"}
         # Pandas 只用于对查询结果做小规模内存分析，不是权威数据源。
@@ -145,7 +154,7 @@ class DataExecutor:
 
     def _pivot(self, object_type: str, index: str, columns: str,
                values: str, aggfunc: str = "mean") -> dict:
-        rows = self.store.query(object_type)
+        rows = self.store.query_objects(object_type)
         if not rows:
             return {"error": f"{object_type} has no data"}
         df = pd.DataFrame(rows).drop(columns=["_id"], errors="ignore")
@@ -170,7 +179,7 @@ class DataExecutor:
 
     def _distribution(self, object_type: str, column: str,
                       bins: int = 10) -> dict:
-        rows = self.store.query(object_type)
+        rows = self.store.query_objects(object_type)
         if not rows:
             return {"error": f"{object_type} has no data"}
         df = pd.DataFrame(rows).drop(columns=["_id"], errors="ignore")

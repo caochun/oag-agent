@@ -10,14 +10,14 @@ import json
 from typing import Any
 
 from .registry import FunctionRegistry
-from .repository import ObjectRepository
+from .repository import OntologyRepository
 from .schema import Ontology
 
 
 class OntologyValidator:
     """Enforces ontology constraints before tools mutate or depend on data."""
 
-    def __init__(self, ontology: Ontology, data: ObjectRepository,
+    def __init__(self, ontology: Ontology, data: OntologyRepository,
                  registry: FunctionRegistry):
         self.ontology = ontology
         self.store = data
@@ -41,18 +41,18 @@ class OntologyValidator:
             missing = []
             for pre in fdef.preconditions:
                 if pre.operator == "exists":
-                    rows = self.store.query(pre.object, limit=1)
+                    rows = self.store.query_objects(pre.object, limit=1)
                     if not rows:
                         missing.append(f"{pre.object} 不存在任何记录")
                 elif pre.operator == "eq":
                     expected = self._precondition_value(pre, args)
-                    rows = self.store.query(pre.object, filters={pre.field: expected}, limit=1)
+                    rows = self.store.query_objects(pre.object, filters={pre.field: expected}, limit=1)
                     if not rows:
                         missing.append(f"{pre.object}.{pre.field} 需要为 {expected}")
                 elif pre.operator == "in":
                     found = False
                     for v in (pre.value or []):
-                        if self.store.query(pre.object, filters={pre.field: v}, limit=1):
+                        if self.store.query_objects(pre.object, filters={pre.field: v}, limit=1):
                             found = True
                             break
                     if not found:
@@ -105,7 +105,7 @@ class OntologyValidator:
 
         existing = None
         if operation in ("update", "delete") and object_id:
-            existing = self.store.query_by_id(object_type, object_id)
+            existing = self.store.get_object(object_type, object_id)
             if not existing:
                 found_in = self._find_object_type(object_id)
                 if found_in:
@@ -116,7 +116,7 @@ class OntologyValidator:
                 return json.dumps({"error": f"在 {object_type} 中未找到 {object_id}"}, ensure_ascii=False)
 
         if operation == "update" and "status" in data and obj_def.status_transitions:
-            existing = existing or self.store.query_by_id(object_type, object_id)
+            existing = existing or self.store.get_object(object_type, object_id)
             if existing:
                 old_status = existing.get("status", "")
                 new_status = data["status"]
@@ -174,7 +174,7 @@ class OntologyValidator:
 
     def _find_object_type(self, object_id: Any) -> str | None:
         for type_name in self.ontology.objects:
-            row = self.store.query_by_id(type_name, object_id)
+            row = self.store.get_object(type_name, object_id)
             if row:
                 return type_name
         return None

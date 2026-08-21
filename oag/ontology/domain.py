@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .registry import FunctionRegistry
-from .repository import ObjectRepository
+from .repository import OntologyRepository
 from .schema import Ontology
 
 
@@ -18,7 +18,7 @@ class DomainContext:
     domain_dir: Path
     ontology: Ontology
     registry: FunctionRegistry
-    repository: ObjectRepository
+    repository: OntologyRepository
 
 
 class DomainProvider(Protocol):
@@ -28,4 +28,4 @@ class DomainProvider(Protocol):
         """Return the final ontology used by every runtime component."""
 
     def register(self, context: DomainContext) -> None:
-        """Register adapters, resolvers and function implementations."""
+        """Register source adapters, runtime services, and functions."""

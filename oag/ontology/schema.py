@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 STANDARD_RUNTIME_TOOLS = frozenset({
     "inspect",
     "query",
     "count",
-    "query_links",
+    "query_relations",
     "describe",
     "pivot",
     "distribution",
@@ -47,13 +47,21 @@ class ObjectConstraint(BaseModel):
     reason: str = ""
 
 
-class ObjectSourceDef(BaseModel):
-    type: str = "table"  # table / resolver / json / http / sql
-    table: str = ""
-    resolver: str = ""
-    id_field: str = ""
+class DataSourceDef(BaseModel):
+    """A named runtime data source, independent from ontology semantics."""
+
+    type: str
+    mode: Literal["read_only", "writable"] = "read_only"
     capabilities: list[str] = []
     config: dict[str, Any] = {}
+
+
+class DataBindingDef(BaseModel):
+    """Map one logical object or relation definition to a named source."""
+
+    source: str
+    selector: dict[str, Any] = {}
+    mapping: dict[str, Any] = {}
 
 
 class ObjectAliasDef(BaseModel):
@@ -62,14 +70,17 @@ class ObjectAliasDef(BaseModel):
 
 
 class ObjectTypeDef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     kind: str = "entity"  # entity / rule_table / lookup_table / config
     description: str = ""
     summary: str = ""
     display_name: str = ""
     aliases: list[ObjectAliasDef] = []
     countable: bool = False
+    type_policy: Literal["closed", "open"] = "closed"
     properties: dict[str, PropertyDef] = {}
-    source: ObjectSourceDef | None = None
+    binding: DataBindingDef | None = None
     status_transitions: dict[str, list[str]] = {}
     excluded_functions: list[str] = []
     constraints: list[ObjectConstraint] = []
@@ -77,13 +88,23 @@ class ObjectTypeDef(BaseModel):
     mutability: str = ""  # read_only / append_only / mutable
 
 
-class LinkDef(BaseModel):
-    source: str
-    target: str
-    join: dict[str, str]
+class RelationTypeDef(BaseModel):
+    """First-class ontology relation with independently queryable instances."""
+
+    model_config = ConfigDict(extra="forbid")
+
     description: str = ""
-    link_type: str = "contains"  # contains / causal / enables / prevents
-    cardinality: str = ""  # 1..1 / 1..n / 0..n / 0..1
+    summary: str = ""
+    display_name: str = ""
+    from_types: list[str] = []
+    to_types: list[str] = []
+    directed: bool = True
+    cardinality: str = ""
+    type_policy: Literal["closed", "open"] = "closed"
+    properties: dict[str, PropertyDef] = {}
+    binding: DataBindingDef | None = None
+    data_source: str = ""
+    mutability: str = ""
 
 
 class FunctionParam(BaseModel):
@@ -258,13 +279,18 @@ class EventPolicyDef(BaseModel):
 
 
 class Ontology(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    schema_id: str = Field("", alias="schema")
     name: str
+    version: str = ""
     description: str = ""
     tool_preferences: dict[str, Any] = {}
     excluded_tools: list[str] = []
     runtime_tools: list[str] = []
+    data_sources: dict[str, DataSourceDef] = {}
     objects: dict[str, ObjectTypeDef] = {}
-    links: dict[str, LinkDef] = {}
+    relations: dict[str, RelationTypeDef] = {}
     functions: dict[str, FunctionDef] = {}
     rules: dict[str, RuleDef] = {}
     workflows: dict[str, WorkflowDef] = {}
@@ -274,6 +300,18 @@ class Ontology(BaseModel):
 
     @model_validator(mode="after")
     def validate_event_policy_objects(self):
+        known_objects = set(self.objects)
+        for name, definition in self.objects.items():
+            self._validate_binding(f"object {name}", definition.binding)
+        for name, definition in self.relations.items():
+            self._validate_binding(f"relation {name}", definition.binding)
+            unknown_from = set(definition.from_types) - known_objects
+            unknown_to = set(definition.to_types) - known_objects
+            if unknown_from or unknown_to:
+                unknown = sorted(unknown_from | unknown_to)
+                raise ValueError(
+                    f"relation {name} references unknown objects: {', '.join(unknown)}"
+                )
         for tool_name, tool in self.presentation_tools.items():
             unknown_objects = set(tool.allowed_objects) - set(self.objects)
             if unknown_objects:
@@ -333,6 +371,18 @@ class Ontology(BaseModel):
                     )
         return self
 
+    def _validate_binding(
+        self,
+        label: str,
+        binding: DataBindingDef | None,
+    ) -> None:
+        if binding is None:
+            raise ValueError(f"{label} 必须声明 data binding")
+        if binding.source not in self.data_sources:
+            raise ValueError(
+                f"{label} references unknown data source: {binding.source}"
+            )
+
     @classmethod
     def load(cls, path: str | Path) -> Ontology:
         with open(path) as f:
@@ -340,25 +390,13 @@ class Ontology(BaseModel):
         return cls.model_validate(raw)
 
     def get_id_column(self, object_type: str) -> str | None:
-        obj = self.objects.get(object_type)
+        obj = self.objects.get(object_type) or self.relations.get(object_type)
         if not obj:
             return None
         for name, prop in obj.properties.items():
             if prop.required:
                 return name
         return None
-
-    def table_name(self, object_type: str) -> str:
-        obj = self.objects.get(object_type)
-        if obj and obj.source and obj.source.table:
-            return obj.source.table
-
-        result = []
-        for i, ch in enumerate(object_type):
-            if ch.isupper() and i > 0:
-                result.append("_")
-            result.append(ch.lower())
-        return "".join(result)
 
     def get_rules_for_object(self, object_type: str) -> dict[str, RuleDef]:
         return {

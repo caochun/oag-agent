@@ -10,14 +10,15 @@ from oag.ontology.loader import load_domain
 
 BASE_ONTOLOGY = """
 name: Base domain
+data_sources:
+  graph:
+    type: sqlite_property_graph
+    config: {database: data.db}
 objects:
   Thing:
     display_name: Thing
-    source:
-      type: json_file
-      id_field: id
-      config:
-        path: data.json
+    binding: {source: graph}
+    properties: {id: {type: str, required: true}}
 functions: {}
 """
 
@@ -31,7 +32,7 @@ class DomainLoaderTest(unittest.TestCase):
     def test_provider_loads_final_ontology_before_repository_creation(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            write(root / "data.json", "[]")
+            write(root / "data.db", "")
             write(root / "domain.yaml", """
                 schema: oag.domain.v1
                 provider: provider:create_domain
@@ -46,13 +47,11 @@ class DomainLoaderTest(unittest.TestCase):
                             "objects": {
                                 "Thing": {
                                     "display_name": "Thing",
-                                    "source": {
-                                        "type": "json_file",
-                                        "id_field": "id",
-                                        "config": {"path": "data.json"},
-                                    },
+                                    "binding": {"source": "graph"},
+                                    "properties": {"id": {"type": "str", "required": True}},
                                 },
                             },
+                            "data_sources": {"graph": {"type": "sqlite_property_graph", "config": {"database": "data.db"}}},
                             "functions": {
                                 "domain_name": {"summary": "Domain name"},
                             },
@@ -83,7 +82,6 @@ class DomainLoaderTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             write(root / "ontology.yaml", BASE_ONTOLOGY)
-            write(root / "data.json", "[]")
             write(root / "functions" / "__init__.py", """
                 from oag.ontology.schema import FunctionDef
 

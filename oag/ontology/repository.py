@@ -1,298 +1,363 @@
-"""Ontology object repository and data-source adapters.
+"""Repository boundary for ontology objects and relations.
 
-The repository is the runtime-facing data boundary for ontology objects. It
-routes each ontology object to its declared source adapter or resolver.
+Every logical type is bound to a named data source. The repository keeps the
+domain vocabulary separate from the physical source adapter and exposes only
+object/relation operations to the rest of OAG.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from inspect import Parameter, signature
-from typing import Any, Protocol
+from collections.abc import Iterable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from .registry import FunctionRegistry
-from .schema import ObjectSourceDef, Ontology
+from .schema import DataBindingDef, Ontology
 
 
-class ObjectAdapter(Protocol):
-    def query(self, object_type: str, filters: dict[str, Any] | None = None,
-              limit: int | None = None, order_by: str | None = None,
-              offset: int | None = None) -> list[dict]: ...
-    def count(self, object_type: str, filters: dict[str, Any] | None = None) -> int: ...
-    def query_by_id(self, object_type: str, id_value: Any) -> dict | None: ...
-    def search_text(self, keyword: str, object_types: list[str] | None = None,
-                    limit: int = 20) -> list[dict]: ...
-    def insert_record(self, object_type: str, data: dict) -> dict: ...
-    def update_record(self, object_type: str, id_value: Any, data: dict) -> dict: ...
-    def delete_record(self, object_type: str, id_value: Any) -> dict: ...
-    def table_count(self, object_type: str) -> int: ...
+RecordKind = Literal["object", "relation"]
 
 
-class ResolverAdapter:
-    """Adapter for developer-defined object resolvers."""
+@runtime_checkable
+class SourceAdapter(Protocol):
+    """Adapter for one named source that can expose objects and relations."""
 
-    def __init__(self, ontology: Ontology, source: ObjectSourceDef,
-                 resolver: Any):
-        self.ontology = ontology
-        self.source = source
-        self.resolver = resolver
+    location: Any
 
-    def query(self, object_type: str, filters: dict[str, Any] | None = None,
-              limit: int | None = None, order_by: str | None = None,
-              offset: int | None = None) -> list[dict]:
-        rows = self._call(
-            "query",
-            object_type=object_type,
-            filters=filters,
-            limit=limit,
-            order_by=order_by,
-            offset=offset,
-        )
-        if rows is None:
-            return []
-        if isinstance(rows, dict):
-            return [rows]
-        return [dict(row) for row in rows]
+    def query_records(
+        self, kind: RecordKind, type_name: str, binding: DataBindingDef,
+        filters: dict[str, Any] | None = None, limit: int | None = None,
+        order_by: str | None = None, offset: int | None = None,
+    ) -> list[dict]: ...
 
-    def count(self, object_type: str, filters: dict[str, Any] | None = None) -> int:
-        if self._supports("count"):
-            return int(self._call("count", object_type=object_type, filters=filters))
-        return len(self.query(object_type, filters))
+    def count_records(
+        self, kind: RecordKind, type_name: str, binding: DataBindingDef,
+        filters: dict[str, Any] | None = None,
+    ) -> int: ...
 
-    def query_by_id(self, object_type: str, id_value: Any) -> dict | None:
-        if self._supports("query_by_id"):
-            row = self._call("query_by_id", object_type=object_type, id_value=id_value)
-            return dict(row) if row else None
+    def query_record_by_id(
+        self, kind: RecordKind, type_name: str, binding: DataBindingDef,
+        id_value: Any,
+    ) -> dict | None: ...
 
-        id_col = self.source.id_field or self.ontology.get_id_column(object_type)
-        if not id_col:
-            return None
-        rows = self.query(object_type, {id_col: id_value}, limit=1)
-        return rows[0] if rows else None
-
-    def search_text(self, keyword: str, object_types: list[str] | None = None,
-                    limit: int = 20) -> list[dict]:
-        if self._supports("search_text"):
-            rows = self._call(
-                "search_text",
-                keyword=keyword,
-                object_types=object_types,
-                limit=limit,
-            )
-            return [dict(row) for row in rows or []]
-        return _search_rows(
-            ontology=self.ontology,
-            keyword=keyword,
-            object_types=object_types,
-            limit=limit,
-            query_fn=self.query,
-        )
-
-    def insert_record(self, object_type: str, data: dict) -> dict:
-        if self._supports("insert_record"):
-            return dict(self._call("insert_record", object_type=object_type, data=data))
-        raise ValueError(f"{object_type} 的 resolver 不支持 create")
-
-    def update_record(self, object_type: str, id_value: Any, data: dict) -> dict:
-        if self._supports("update_record"):
-            return dict(self._call(
-                "update_record",
-                object_type=object_type,
-                id_value=id_value,
-                data=data,
-            ))
-        raise ValueError(f"{object_type} 的 resolver 不支持 update")
-
-    def delete_record(self, object_type: str, id_value: Any) -> dict:
-        if self._supports("delete_record"):
-            return dict(self._call(
-                "delete_record",
-                object_type=object_type,
-                id_value=id_value,
-            ))
-        raise ValueError(f"{object_type} 的 resolver 不支持 delete")
-
-    def table_count(self, object_type: str) -> int:
-        return self.count(object_type)
-
-    def _supports(self, operation: str) -> bool:
-        return hasattr(self.resolver, operation) or (
-            operation == "query" and callable(self.resolver)
-        )
-
-    def _call(self, operation: str, **kwargs) -> Any:
-        if hasattr(self.resolver, operation):
-            fn = getattr(self.resolver, operation)
-            return _call_resolver(fn, **kwargs)
-        if operation == "query" and callable(self.resolver):
-            return _call_resolver(self.resolver, **kwargs)
-        raise ValueError(f"resolver {self.source.resolver} 不支持 {operation}")
+    def query_relations(self, relation_type: str, binding: DataBindingDef, **kwargs) -> list[dict]: ...
+    def search_records(self, kind: RecordKind, type_name: str, binding: DataBindingDef,
+                       keyword: str, limit: int = 20) -> list[dict]: ...
+    def close(self) -> None: ...
 
 
-class ObjectRepository:
-    """Unified access point for ontology object data."""
+@runtime_checkable
+class WritableSource(Protocol):
+    def create_record(self, kind: RecordKind, type_name: str,
+                      binding: DataBindingDef, data: dict) -> dict: ...
+    def update_record(self, kind: RecordKind, type_name: str,
+                      binding: DataBindingDef, id_value: Any, data: dict) -> dict: ...
+    def retire_record(self, kind: RecordKind, type_name: str,
+                      binding: DataBindingDef, id_value: Any) -> dict: ...
+
+
+@runtime_checkable
+class BulkGraphSource(Protocol):
+    def query_by_ids(self, kind: RecordKind, type_name: str, binding: DataBindingDef,
+                     ids: Iterable[Any], *, include_retired: bool = False) -> list[dict]: ...
+    def query_adjacent(self, relation_type: str, binding: DataBindingDef,
+                       object_ids: Iterable[Any], *, include_retired: bool = False) -> list[dict]: ...
+    def type_counts(self, kind: RecordKind, type_name: str, binding: DataBindingDef) -> dict[str, int]: ...
+    def record_exists(self, kind: RecordKind, type_name: str,
+                      binding: DataBindingDef, record_id: str) -> bool: ...
+    def get_record_version(self, kind: RecordKind, type_name: str,
+                           binding: DataBindingDef, record_id: str) -> dict[str, Any] | None: ...
+
+
+@runtime_checkable
+class AtomicGraphSource(Protocol):
+    def apply_changeset(self, operations: list[dict[str, Any]], **kwargs) -> None: ...
+    def replace_graph(self, objects: list[dict], relations: list[dict], **kwargs) -> None: ...
+
+
+@runtime_checkable
+class HistorySource(Protocol):
+    def list_action_log(self, limit: int = 100) -> list[dict]: ...
+    def list_record_history(self, kind: RecordKind, record_id: str,
+                            limit: int = 100) -> list[dict]: ...
+
+
+class OntologyRepository:
+    """Unified access point for ontology object and relation data."""
 
     def __init__(self, ontology: Ontology, registry: FunctionRegistry):
         self.ontology = ontology
         self.registry = registry
-        self._adapters: dict[str, ObjectAdapter] = {}
+        self._source_adapters: dict[str, SourceAdapter] = {}
 
-    def adapter_for(self, object_type: str) -> ObjectAdapter:
-        if object_type in self._adapters:
-            return self._adapters[object_type]
+    def query_objects(self, object_type: str, filters: dict[str, Any] | None = None,
+                      limit: int | None = None, order_by: str | None = None,
+                      offset: int | None = None) -> list[dict]:
+        return self._query_records("object", object_type, filters, limit, order_by, offset)
 
-        obj_def = self.ontology.objects.get(object_type)
-        if not obj_def:
-            raise ValueError(f"未知对象类型: {object_type}")
+    def count_objects(self, object_type: str,
+                      filters: dict[str, Any] | None = None) -> int:
+        return self._count_records("object", object_type, filters)
 
-        source = obj_def.source or ObjectSourceDef()
-        source_type = source.type or ""
-        if source_type == "resolver":
-            if not source.resolver:
-                raise ValueError(f"{object_type} 的 source.resolver 不能为空")
-            resolver = self.registry.get_resolver(source.resolver)
-            if resolver is None:
-                raise ValueError(f"未注册对象 resolver: {source.resolver}")
-            adapter = ResolverAdapter(self.ontology, source, resolver)
-        else:
-            if not source_type:
-                raise ValueError(f"{object_type} 未声明 source.type")
-            factory = self.registry.get_adapter_factory(source_type)
-            if factory is None:
-                raise ValueError(f"{object_type} 不支持的数据源类型: {source_type}")
-            adapter = factory(
-                ontology=self.ontology,
-                registry=self.registry,
-                object_type=object_type,
-                source=source,
-            )
+    def get_object(self, object_type: str, id_value: Any) -> dict | None:
+        return self._get_record("object", object_type, id_value)
 
-        self._adapters[object_type] = adapter
-        return adapter
-
-    def query(self, object_type: str, filters: dict[str, Any] | None = None,
-              limit: int | None = None, order_by: str | None = None,
-              offset: int | None = None) -> list[dict]:
-        return self.adapter_for(object_type).query(
-            object_type, filters, limit, order_by, offset,
+    def query_relations(
+        self,
+        relation_type: str,
+        filters: dict[str, Any] | None = None,
+        *,
+        from_id: Any = None,
+        to_id: Any = None,
+        direction: Literal["out", "in", "both"] = "out",
+        limit: int | None = None,
+        order_by: str | None = None,
+        offset: int | None = None,
+    ) -> list[dict]:
+        if direction not in {"out", "in", "both"}:
+            raise ValueError("direction 必须是 out、in 或 both")
+        definition = self._definition("relation", relation_type)
+        return self._source_adapter(definition.binding.source).query_relations(
+            relation_type, definition.binding, filters=filters,
+            from_id=from_id, to_id=to_id,
+            direction=direction, limit=limit,
+            order_by=order_by, offset=offset,
         )
 
-    def count(self, object_type: str, filters: dict[str, Any] | None = None) -> int:
-        return self.adapter_for(object_type).count(object_type, filters)
+    def count_relations(self, relation_type: str,
+                        filters: dict[str, Any] | None = None) -> int:
+        return self._count_records("relation", relation_type, filters)
 
-    def query_by_id(self, object_type: str, id_value: Any) -> dict | None:
-        return self.adapter_for(object_type).query_by_id(object_type, id_value)
+    def get_relation(self, relation_type: str, id_value: Any) -> dict | None:
+        return self._get_record("relation", relation_type, id_value)
 
-    def query_links(self, source_type: str, source_id: Any,
-                    link_name: str) -> list[dict]:
-        link = self.ontology.links.get(link_name)
-        if not link:
-            return []
-        if link.source != source_type:
-            return []
+    def create_object(self, object_type: str, data: dict) -> dict:
+        return self._create_record("object", object_type, data)
 
-        source_row = self.query_by_id(source_type, source_id)
-        if not source_row:
-            return []
+    def update_object(self, object_type: str, id_value: Any, data: dict) -> dict:
+        return self._update_record("object", object_type, id_value, data)
 
-        source_key = link.join.get("source_key")
-        target_key = link.join.get("target_key")
-        if not source_key or not target_key:
-            return []
+    def retire_object(self, object_type: str, id_value: Any) -> dict:
+        return self._delete_record("object", object_type, id_value)
 
-        source_key_value = source_row.get(source_key)
-        if source_key_value is None:
-            return []
-        return self.query(link.target, {target_key: source_key_value})
+    def create_relation(self, relation_type: str, data: dict) -> dict:
+        return self._create_record("relation", relation_type, data)
+
+    def update_relation(self, relation_type: str, id_value: Any, data: dict) -> dict:
+        return self._update_record("relation", relation_type, id_value, data)
+
+    def retire_relation(self, relation_type: str, id_value: Any) -> dict:
+        return self._delete_record("relation", relation_type, id_value)
 
     def search_text(self, keyword: str, object_types: list[str] | None = None,
                     limit: int = 20) -> list[dict]:
         if not keyword:
             return []
-
-        types_to_search = object_types or list(self.ontology.objects.keys())
+        types_to_search = object_types or list(self.ontology.objects)
         results: list[dict] = []
-        for object_type in types_to_search:
-            rows = self.adapter_for(object_type).search_text(
-                keyword,
-                [object_type],
-                limit - len(results),
-            )
+        for type_name in types_to_search:
+            rows = self._search_records("object", type_name, keyword, limit - len(results))
             results.extend(rows)
             if len(results) >= limit:
                 break
         return results[:limit]
 
-    def insert_record(self, object_type: str, data: dict) -> dict:
-        return self.adapter_for(object_type).insert_record(object_type, data)
+    def query_by_ids(self, kind: RecordKind, type_name: str, ids: Iterable[Any],
+                     *, include_retired: bool = False) -> list[dict]:
+        definition = self._definition(kind, type_name)
+        adapter = self._source_for(kind, type_name)
+        if isinstance(adapter, BulkGraphSource):
+            return adapter.query_by_ids(
+                kind, type_name, definition.binding, ids,
+                include_retired=include_retired,
+            )
+        return [
+            record
+            for record_id in ids
+            if (record := self._get_record(kind, type_name, record_id)) is not None
+        ]
 
-    def update_record(self, object_type: str, id_value: Any, data: dict) -> dict:
-        return self.adapter_for(object_type).update_record(object_type, id_value, data)
+    def query_adjacent(self, relation_type: str, object_ids: Iterable[Any],
+                       *, include_retired: bool = False) -> list[dict]:
+        definition = self._definition("relation", relation_type)
+        adapter = self._source_for("relation", relation_type)
+        if isinstance(adapter, BulkGraphSource):
+            return adapter.query_adjacent(
+                relation_type, definition.binding, object_ids,
+                include_retired=include_retired,
+            )
+        rows: dict[str, dict] = {}
+        for object_id in object_ids:
+            for row in self.query_relations(
+                relation_type, from_id=object_id, direction="both",
+            ):
+                rows[str(row.get("id"))] = row
+        return list(rows.values())
 
-    def delete_record(self, object_type: str, id_value: Any) -> dict:
-        return self.adapter_for(object_type).delete_record(object_type, id_value)
+    def type_counts(self, kind: RecordKind, type_name: str) -> dict[str, int]:
+        definition = self._definition(kind, type_name)
+        adapter = self._source_for(kind, type_name)
+        if isinstance(adapter, BulkGraphSource):
+            return adapter.type_counts(kind, type_name, definition.binding)
+        counts: dict[str, int] = {}
+        for record in self._query_records(kind, type_name):
+            discriminator = str(record.get("type") or "unknown")
+            counts[discriminator] = counts.get(discriminator, 0) + 1
+        return counts
 
-    def table_count(self, object_type: str) -> int:
-        return self.adapter_for(object_type).table_count(object_type)
+    def record_exists(self, kind: RecordKind, type_name: str, record_id: str) -> bool:
+        definition = self._definition(kind, type_name)
+        adapter = self._source_for(kind, type_name)
+        if isinstance(adapter, BulkGraphSource):
+            return bool(adapter.record_exists(kind, type_name, definition.binding, record_id))
+        return self._get_record(kind, type_name, record_id) is not None
 
-    def close(self):
-        for adapter in self._adapters.values():
-            close = getattr(adapter, "close", None)
-            if callable(close):
-                close()
+    def get_record_version(self, kind: RecordKind, type_name: str,
+                           record_id: str) -> dict[str, Any] | None:
+        definition = self._definition(kind, type_name)
+        adapter = self._source_for(kind, type_name)
+        if isinstance(adapter, BulkGraphSource):
+            return adapter.get_record_version(kind, type_name, definition.binding, record_id)
+        return None
 
-
-def _call_resolver(fn: Callable[..., Any], **kwargs) -> Any:
-    sig = signature(fn)
-    params = sig.parameters
-    if any(p.kind == Parameter.VAR_KEYWORD for p in params.values()):
-        return fn(**kwargs)
-
-    if any(p.kind in (Parameter.VAR_POSITIONAL, Parameter.POSITIONAL_ONLY)
-           for p in params.values()):
-        return fn(
-            kwargs["object_type"],
-            kwargs.get("filters"),
-            kwargs.get("limit"),
-            kwargs.get("order_by"),
-            kwargs.get("offset"),
+    def apply_changeset(self, operations: list[dict[str, Any]], *,
+                        object_type: str = "Object",
+                        relation_type: str = "Relation", **kwargs) -> None:
+        adapter = self._shared_graph_source(object_type, relation_type)
+        if not isinstance(adapter, AtomicGraphSource):
+            raise TypeError("数据源不支持原子 ChangeSet")
+        adapter.apply_changeset(
+            operations,
+            object_binding=self.ontology.objects[object_type].binding,
+            relation_binding=self.ontology.relations[relation_type].binding,
+            **kwargs,
         )
 
-    supported = {
-        name: value
-        for name, value in kwargs.items()
-        if name in params
-    }
-    return fn(**supported)
+    def replace_graph(self, objects: list[dict], relations: list[dict], *,
+                      object_type: str = "Object",
+                      relation_type: str = "Relation", **kwargs) -> None:
+        adapter = self._shared_graph_source(object_type, relation_type)
+        if not isinstance(adapter, AtomicGraphSource):
+            raise TypeError("数据源不支持图重建")
+        adapter.replace_graph(objects, relations, **kwargs)
 
+    def list_action_log(self, *, object_type: str = "Object", limit: int = 100):
+        adapter = self._source_for("object", object_type)
+        if not isinstance(adapter, HistorySource):
+            return []
+        return adapter.list_action_log(limit=limit)
 
-def _search_rows(ontology: Ontology, keyword: str,
-                 object_types: list[str] | None, limit: int,
-                 query_fn: Callable[..., list[dict]]) -> list[dict]:
-    if not keyword:
-        return []
+    def list_record_history(self, kind: RecordKind, record_id: str, *,
+                            object_type: str = "Object", limit: int = 100):
+        adapter = self._source_for("object", object_type)
+        if not isinstance(adapter, HistorySource):
+            raise TypeError("数据源不支持记录历史")
+        return adapter.list_record_history(kind, record_id, limit=limit)
 
-    types_to_search = object_types or list(ontology.objects.keys())
-    results: list[dict] = []
-    for type_name in types_to_search:
-        obj_def = ontology.objects.get(type_name)
-        if not obj_def:
-            continue
-        text_cols = [p for p, d in obj_def.properties.items() if d.type == "str"]
-        if not text_cols:
-            continue
+    def source_location(self, kind: RecordKind, type_name: str):
+        adapter = self._source_for(kind, type_name)
+        return adapter.location
 
-        for record in query_fn(type_name):
-            matched = [
-                col for col in text_cols
-                if record.get(col) and keyword in str(record[col])
-            ]
-            if not matched:
-                continue
-            enriched = dict(record)
-            enriched["_object_type"] = type_name
-            enriched["_matched_field"] = ", ".join(matched)
-            results.append(enriched)
-            if len(results) >= limit:
-                return results
-    return results
+    def close(self):
+        for adapter in self._source_adapters.values():
+            adapter.close()
+
+    def _query_records(self, kind, type_name, filters=None, limit=None,
+                       order_by=None, offset=None):
+        definition = self._definition(kind, type_name)
+        return self._source_adapter(definition.binding.source).query_records(
+            kind, type_name, definition.binding,
+            filters, limit, order_by, offset,
+        )
+
+    def _count_records(self, kind, type_name, filters=None):
+        definition = self._definition(kind, type_name)
+        return self._source_adapter(definition.binding.source).count_records(
+            kind, type_name, definition.binding, filters,
+        )
+
+    def _get_record(self, kind, type_name, id_value):
+        definition = self._definition(kind, type_name)
+        return self._source_adapter(definition.binding.source).query_record_by_id(
+            kind, type_name, definition.binding, id_value,
+        )
+
+    def _search_records(self, kind, type_name, keyword, limit=20):
+        definition = self._definition(kind, type_name)
+        adapter = self._source_for(kind, type_name)
+        return adapter.search_records(kind, type_name, definition.binding, keyword, limit)
+
+    def _create_record(self, kind, type_name, data):
+        definition = self._definition(kind, type_name)
+        self._assert_writable(definition.binding.source)
+        adapter = self._source_adapter(definition.binding.source)
+        if not isinstance(adapter, WritableSource):
+            raise TypeError(f"数据源 {definition.binding.source} 不支持写入")
+        return adapter.create_record(
+            kind, type_name, definition.binding, data,
+        )
+
+    def _update_record(self, kind, type_name, id_value, data):
+        definition = self._definition(kind, type_name)
+        self._assert_writable(definition.binding.source)
+        adapter = self._source_adapter(definition.binding.source)
+        if not isinstance(adapter, WritableSource):
+            raise TypeError(f"数据源 {definition.binding.source} 不支持写入")
+        return adapter.update_record(
+            kind, type_name, definition.binding, id_value, data,
+        )
+
+    def _delete_record(self, kind, type_name, id_value):
+        definition = self._definition(kind, type_name)
+        self._assert_writable(definition.binding.source)
+        adapter = self._source_adapter(definition.binding.source)
+        if not isinstance(adapter, WritableSource):
+            raise TypeError(f"数据源 {definition.binding.source} 不支持写入")
+        return adapter.retire_record(
+            kind, type_name, definition.binding, id_value,
+        )
+
+    def _source_for(self, kind: RecordKind, type_name: str):
+        definition = self._definition(kind, type_name)
+        return self._source_adapter(definition.binding.source)
+
+    def _source_adapter(self, source_name: str) -> SourceAdapter:
+        if source_name in self._source_adapters:
+            return self._source_adapters[source_name]
+        source = self.ontology.data_sources.get(source_name)
+        if source is None:
+            raise ValueError(f"未知数据源: {source_name}")
+        factory = self.registry.get_source_adapter_factory(source.type)
+        if factory is None:
+            raise ValueError(f"不支持的数据源类型: {source.type}")
+        adapter = factory(
+            ontology=self.ontology, registry=self.registry,
+            source_name=source_name, source=source,
+        )
+        if not isinstance(adapter, SourceAdapter):
+            raise TypeError(
+                f"数据源适配器 {source.type} 未实现 SourceAdapter 协议"
+            )
+        self._source_adapters[source_name] = adapter
+        return adapter
+
+    def _definition(self, kind: RecordKind, type_name: str):
+        definitions = self.ontology.objects if kind == "object" else self.ontology.relations
+        definition = definitions.get(type_name)
+        if definition is None:
+            label = "对象" if kind == "object" else "关系"
+            raise ValueError(f"未知{label}类型: {type_name}")
+        return definition
+
+    def _shared_graph_source(self, object_type: str, relation_type: str):
+        object_binding = self._definition("object", object_type).binding
+        relation_binding = self._definition("relation", relation_type).binding
+        if object_binding is None or relation_binding is None:
+            raise TypeError("图操作需要命名对象和关系绑定")
+        if object_binding.source != relation_binding.source:
+            raise ValueError("一个原子图操作不能跨越多个数据源")
+        self._assert_writable(object_binding.source)
+        return self._source_adapter(object_binding.source)
+
+    def _assert_writable(self, source_name: str) -> None:
+        if self.ontology.data_sources[source_name].mode != "writable":
+            raise ValueError(f"数据源 {source_name} 是只读的")

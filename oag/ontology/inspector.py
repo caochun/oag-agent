@@ -81,7 +81,7 @@ class OntologyInspector:
                 "object_kind": obj.kind,
                 "summary": obj.summary,
                 "description": obj.description,
-                "source": obj.source.model_dump() if obj.source else {"type": "table"},
+                "binding": obj.binding.model_dump(),
                 "data_source": obj.data_source,
                 "mutability": obj.mutability,
                 "properties": {
@@ -110,6 +110,30 @@ class OntologyInspector:
                     for rname, rdef in rules.items()
                 }
             return json.dumps(info, ensure_ascii=False, default=str)
+
+        relation = self.ontology.relations.get(target)
+        if relation:
+            return json.dumps({
+                "kind": "relation",
+                "name": target,
+                "summary": relation.summary,
+                "description": relation.description,
+                "display_name": relation.display_name,
+                "from_types": relation.from_types,
+                "to_types": relation.to_types,
+                "directed": relation.directed,
+                "cardinality": relation.cardinality,
+                "binding": relation.binding.model_dump(),
+                "properties": {
+                    name: {
+                        "type": definition.type,
+                        "required": definition.required,
+                        "description": definition.description,
+                        "default": definition.default,
+                    }
+                    for name, definition in relation.properties.items()
+                },
+            }, ensure_ascii=False, default=str)
 
         rdef = self.ontology.rules.get(target)
         if rdef:

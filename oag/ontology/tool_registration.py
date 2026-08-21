@@ -52,6 +52,7 @@ class OntologyToolRegistrar:
 
     def register_tools(self, tools: ToolRegistry, data: DataExecutor):
         obj_types = list(self.ontology.objects.keys())
+        relation_types = list(self.ontology.relations.keys())
 
         tools.register(ToolDef(
             name="inspect", description="查看函数、对象、规则、展示工具或策略的完整定义",
@@ -68,20 +69,34 @@ class OntologyToolRegistrar:
             category="query",
         ))
 
+        if relation_types:
+            tools.register(ToolDef(
+                name="query_relations",
+                description="查询本体关系实例，可按起点、终点和方向过滤",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "relation_type": {"type": "string", "enum": relation_types},
+                        "filters": {"type": "object"},
+                        "from_id": {"type": "string", "description": "起点对象 ID"},
+                        "to_id": {"type": "string", "description": "终点对象 ID"},
+                        "direction": {"type": "string", "enum": ["out", "in", "both"]},
+                        "order_by": {"type": "string"},
+                        "limit": {"type": "integer"},
+                        "offset": {"type": "integer"},
+                    },
+                    "required": ["relation_type"],
+                },
+                handler=lambda args: data.execute("query_relations", args),
+                category="query",
+            ))
+
         tools.register(ToolDef(
             name="count", description="统计对象数量",
             parameters={"type": "object", "properties": {"object_type": {"type": "string", "enum": obj_types}, "filters": {"type": "object"}}, "required": ["object_type"]},
             handler=lambda args: data.execute("count", args),
             category="query",
         ))
-
-        if self.ontology.links:
-            tools.register(ToolDef(
-                name="query_links", description="沿关系查询关联实例",
-                parameters={"type": "object", "properties": {"source_type": {"type": "string"}, "source_id": {"type": "string"}, "link_name": {"type": "string", "enum": list(self.ontology.links.keys())}}, "required": ["source_type", "source_id", "link_name"]},
-                handler=lambda args: data.execute("query_links", args),
-                category="query",
-            ))
 
         tools.register(ToolDef(
             name="describe", description="统计摘要",

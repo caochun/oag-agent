@@ -12,7 +12,7 @@ from .data_executor import DataExecutor
 from .inspector import OntologyInspector
 from .prompt_builder import OntologyPromptBuilder
 from .registry import FunctionRegistry
-from .repository import ObjectRepository
+from .repository import OntologyRepository
 from .rules import RuleEngine
 from .schema import Ontology
 from .tool_registration import OntologyToolRegistrar
@@ -27,7 +27,7 @@ class OntologyRuntime:
 
     def __init__(self, ontology: Ontology,
                  registry: FunctionRegistry,
-                 repository: ObjectRepository,
+                 repository: OntologyRepository,
                  rule_engine: RuleEngine | None = None,
                  config: HarnessConfig | None = None):
         self.ontology = ontology

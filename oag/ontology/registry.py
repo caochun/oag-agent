@@ -17,8 +17,8 @@ class FunctionRegistry:
         self._functions: dict[str, Callable] = {}
         self._defs: dict[str, FunctionDef] = {}
         self._executed: set[str] = set()
-        self._resolvers: dict[str, Any] = {}
-        self._adapter_factories: dict[str, Callable] = {}
+        self._services: dict[str, Any] = {}
+        self._source_adapter_factories: dict[str, Callable] = {}
 
     def register(self, name: str, fn: Callable, definition: FunctionDef | None = None):
         self._functions[name] = fn
@@ -53,20 +53,21 @@ class FunctionRegistry:
     def list_functions(self) -> list[tuple[str, FunctionDef | None]]:
         return [(name, self._defs.get(name)) for name in self._functions]
 
-    def register_resolver(self, name: str, resolver: Any):
-        self._resolvers[name] = resolver
+    def register_service(self, name: str, service: Any):
+        self._services[name] = service
 
-    def get_resolver(self, name: str) -> Any:
-        return self._resolvers.get(name)
+    def get_service(self, name: str) -> Any:
+        return self._services.get(name)
 
-    def has_resolver(self, name: str) -> bool:
-        return name in self._resolvers
+    def has_service(self, name: str) -> bool:
+        return name in self._services
 
-    def register_adapter(self, source_type: str, factory: Callable):
-        self._adapter_factories[source_type] = factory
+    def register_source_adapter(self, source_type: str, factory: Callable):
+        """Register a factory that creates one adapter per named data source."""
+        self._source_adapter_factories[source_type] = factory
 
-    def get_adapter_factory(self, source_type: str) -> Callable | None:
-        return self._adapter_factories.get(source_type)
+    def get_source_adapter_factory(self, source_type: str) -> Callable | None:
+        return self._source_adapter_factories.get(source_type)
 
     def call_as_tool(self, name: str, args: dict) -> str:
         try:

@@ -35,7 +35,7 @@ uv run python -m compileall -q oag
 my_domain/
   ontology.yaml
   data/
-    assets.json
+    graph.db
   functions/
     __init__.py
 ```
@@ -46,15 +46,20 @@ my_domain/
 name: AssetOps
 description: 资产运维领域
 
+data_sources:
+  operations:
+    type: sqlite_property_graph
+    mode: read_only
+    config:
+      database: data/graph.db
+
 objects:
   Asset:
     summary: 资产基础信息
     mutability: read_only
-    source:
-      type: json_file
-      id_field: asset_id
-      config:
-        path: data/assets.json
+    binding:
+      source: operations
+      selector: {type: asset}
     properties:
       asset_id:
         type: str
@@ -67,10 +72,9 @@ objects:
   WorkOrder:
     summary: 工单
     mutability: mutable
-    source:
-      type: resolver
-      resolver: work_orders
-      id_field: order_id
+    binding:
+      source: operations
+      selector: {type: work_order}
     properties:
       order_id:
         type: str
@@ -160,37 +164,17 @@ Schema 仍由适配器代码绑定；ontology 负责名称、用途、模型使�
 `functions/__init__.py` 负责绑定 Python 实现：
 
 ```python
-class WorkOrderResolver:
-    def __init__(self):
-        self.rows = []
-
-    def query(self, filters=None, limit=None, **kw):
-        rows = self.rows
-        for key, value in (filters or {}).items():
-            rows = [row for row in rows if row.get(key) == value]
-        return rows[:limit] if limit else rows
-
-    def query_by_id(self, id_value):
-        rows = self.query({"order_id": id_value}, limit=1)
-        return rows[0] if rows else None
-
-    def insert_record(self, object_type, data):
-        self.rows.append(dict(data))
-        return {"inserted": 1}
-
-
 def register(registry, repository, ontology):
     def lookup_asset(asset_id: str):
-        return repository.query_by_id("Asset", asset_id) or {"error": "not found"}
+        return repository.get_object("Asset", asset_id) or {"error": "not found"}
 
     def create_work_order(asset_id: str):
-        return repository.insert_record("WorkOrder", {
+        return repository.create_object("WorkOrder", {
             "order_id": "WO-001",
             "asset_id": asset_id,
             "status": "created",
         })
 
-    registry.register_resolver("work_orders", WorkOrderResolver())
     registry.register("lookup_asset", lookup_asset, ontology.functions["lookup_asset"])
     registry.register(
         "create_work_order",
@@ -227,7 +211,7 @@ class Provider:
         return ontology
 
     def register(self, context: DomainContext):
-        # 注册该 Ontology 所需的 adapter、resolver 和函数实现。
+        # 注册该 Ontology 所需的 source adapter、runtime service 和函数实现。
         context.registry.register(...)
 
 
@@ -334,7 +318,7 @@ Harness
   │   ├─ RuleEngine
   │   ├─ WorkflowRuntime
   │   └─ OntologyToolRegistrar
-  ├─ DataExecutor / ObjectRepository
+  ├─ DataExecutor / OntologyRepository
   ├─ ToolRegistry
   ├─ ToolExecutionPipeline
   ├─ RuntimeTools
@@ -388,43 +372,40 @@ Harness
 这个拆法的好处是：ontology schema 增长时，不会把所有逻辑塞进一个大 runtime 类里；
 后续要扩展规则、工作流或 prompt 策略，也能在对应模块里改。
 
-### DataExecutor、ObjectRepository 与 Adapters
+### DataExecutor、OntologyRepository 与 Source Adapters
 
-`DataExecutor` 是工具层的数据执行器。它接收 `query`、`count`、`query_links`、
+`DataExecutor` 是工具层的数据执行器。它接收 `query`、`count`、`query_relations`、
 `mutate`、`search`、`describe` 等工具调用；开启 `enable_analysis_tools` 后还会接收
 `pivot`、`distribution`，然后交给
-`ObjectRepository`。
+`OntologyRepository`。
 
-`ObjectRepository` 是对象数据访问边界，也是领域函数拿到的数据入口。它不拥有本地
-默认数据库，也不会根据 ontology 自动建表或导入 JSON；每个对象必须通过
-`objects.<name>.source` 明确声明数据来源。Repository 根据 `source.type` 路由到具体
-adapter 或 resolver，并向上提供统一接口：
+`OntologyRepository` 是对象和关系的数据访问边界，也是领域函数拿到的数据入口。
+每个对象或关系通过 `binding.source` 绑定到 `data_sources` 中的命名数据源；同一 source
+adapter 可同时映射多个逻辑对象和关系类型。Repository 向上提供统一接口：
 
-- `query(object_type, filters, limit, order_by, offset)`
-- `count(object_type, filters)`
-- `query_by_id(object_type, id_value)`
-- `query_links(source_type, source_id, link_name)`
+- `query_objects / count_objects / get_object`
+- `query_relations / count_relations / get_relation`
 - `search_text(keyword, object_types, limit)`
-- `insert_record / update_record / delete_record`
-- `table_count(object_type)`
+- `create_object / update_object / retire_object`
+- `create_relation / update_relation / retire_relation`
 
-内置 adapter：
+内置 source adapter：
 
-- `json_file`：`JsonFileAdapter`，每次查询直接读取领域目录下的 JSON 文件。它适合
-  demo、规则表、只读快照和本地文件形式的外部数据，不进入 SQLite。
-- `sqlite_table`：`SqliteTableAdapter`，连接已有 SQLite 数据库中的表或视图。它只做
-  读写查删，不创建表、不迁移 schema、不从 JSON 导入数据。
+- `sqlite_property_graph`：把已有 SQLite 节点表和边表映射成逻辑对象与一等关系；
+  物理表名和字段映射留在数据源配置中，不泄漏给智能体。
 
 复杂或非标准数据源用扩展点表达：
 
-- 自定义 adapter：通过 `FunctionRegistry.register_adapter(source_type, factory)` 注册。
+- 自定义 source adapter：通过 `FunctionRegistry.register_source_adapter(source_type, factory)` 注册。
   适合一类可复用数据源，例如 HTTP API、MySQL 表、对象存储文件或运行期内存表。
-- resolver：通过 `FunctionRegistry.register_resolver(name, resolver)` 注册。适合单个对象
-  的定制逻辑，例如多表聚合 SQL、跨 API 组合、图算法结果或业务视图。
-
-Adapter/resolver 的职责是把外部数据源包装成统一对象接口；领域级校验不放在 adapter
+Source adapter 的职责是把外部数据源包装成统一对象/关系接口；领域级校验不放在 adapter
 里，而是放在 `OntologyValidator`。这样数据源实现可以保持窄而稳定，面向用户的错误
 消息、可变性和状态流转约束由工具执行管线统一处理。
+
+基础读取契约是 `SourceAdapter`。写入、批量图查询、原子 ChangeSet 和历史查询分别由
+`WritableSource`、`BulkGraphSource`、`AtomicGraphSource`、`HistorySource` 结构化协议表达；
+adapter 只实现数据源真实支持的能力。Provider 需要向应用暴露 workspace 等运行时对象时，
+使用 `register_service/get_service`，不把服务伪装成数据 resolver。
 
 ### ToolRegistry 与 ToolDef
 
@@ -614,7 +595,7 @@ prompt 更清晰，也更容易按函数维护。
 - `inspect`
 - `query`
 - `count`
-- `query_links`
+- `query_relations`
 - `describe`
 - `mutate`
 - `search`

@@ -11,7 +11,7 @@ import operator
 from typing import Any, Callable
 
 from .registry import FunctionRegistry
-from .repository import ObjectRepository
+from .repository import OntologyRepository
 from .schema import Ontology, RuleCondition, RuleDef
 
 OPERATORS: dict[str, Callable[[Any, Any], bool]] = {
@@ -84,7 +84,7 @@ def _compile_rule(rule_def: RuleDef) -> Callable[[dict], Any]:
 
 
 class RuleEngine:
-    def __init__(self, ontology: Ontology, data: ObjectRepository,
+    def __init__(self, ontology: Ontology, data: OntologyRepository,
                  registry: FunctionRegistry | None = None):
         self.ontology = ontology
         self.store = data
@@ -100,7 +100,7 @@ class RuleEngine:
         if not rule_fn:
             return {"error": f"未知规则: {rule_name}"}
 
-        record = self.store.query_by_id(object_type, object_id)
+        record = self.store.get_object(object_type, object_id)
         if not record:
             return {"error": f"未找到对象: {object_type}#{object_id}"}
 
@@ -121,7 +121,7 @@ class RuleEngine:
         if not rule_fn:
             return [{"error": f"未知规则: {rule_name}"}]
 
-        records = self.store.query(object_type, filters)
+        records = self.store.query_objects(object_type, filters)
         rule_def = self.ontology.rules[rule_name]
         id_col = self.ontology.get_id_column(object_type)
 

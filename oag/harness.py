@@ -17,14 +17,14 @@ from .runtime.components import build_harness_components
 from .tools.pipeline import ToolResult
 from .loop.worker import run_workers_parallel
 from .ontology.registry import FunctionRegistry
-from .ontology.repository import ObjectRepository
+from .ontology.repository import OntologyRepository
 from .ontology.schema import Ontology
 
 logger = logging.getLogger(__name__)
 
 
 class Harness:
-    def __init__(self, ontology: Ontology, repository: ObjectRepository,
+    def __init__(self, ontology: Ontology, repository: OntologyRepository,
                  registry: FunctionRegistry, llm_client: OpenAI,
                  model: str, config: HarnessConfig | None = None):
         self.ontology = ontology

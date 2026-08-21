@@ -41,7 +41,8 @@ def persist_large_tool_result(*, storage_dir: str | None,
 def read_persisted_tool_result(*, path: str,
                                max_chars: int = 12000,
                                storage_dir: str | None = None) -> str:
-    requested = Path(path).expanduser().resolve()
+    display_path = Path(path).expanduser()
+    requested = display_path.resolve()
     allowed_roots = [_base_dir(None).resolve()]
     if storage_dir:
         allowed_roots.append(_base_dir(storage_dir).resolve())
@@ -57,7 +58,7 @@ def read_persisted_tool_result(*, path: str,
     content = requested.read_text(encoding="utf-8", errors="replace")
     truncated = len(content) > max_chars
     return json.dumps({
-        "path": str(requested),
+        "path": str(display_path),
         "chars": len(content),
         "returned_chars": min(len(content), max_chars),
         "truncated": truncated,

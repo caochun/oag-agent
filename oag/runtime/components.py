@@ -14,7 +14,7 @@ from openai import OpenAI
 from ..llm.context import ContextManager
 from ..ontology.data_executor import DataExecutor
 from ..ontology.registry import FunctionRegistry
-from ..ontology.repository import ObjectRepository
+from ..ontology.repository import OntologyRepository
 from ..ontology.rules import RuleEngine
 from ..ontology.runtime import OntologyRuntime
 from ..ontology.schema import Ontology
@@ -37,7 +37,7 @@ class HarnessComponents:
     hooks: HookRegistry
     audit: AuditLog
     rule_engine: RuleEngine | None
-    repository: ObjectRepository
+    repository: OntologyRepository
     context_mgr: ContextManager
     ont: OntologyRuntime
     data: DataExecutor
@@ -50,7 +50,7 @@ class HarnessComponents:
 
 def build_harness_components(
     ontology: Ontology,
-    repository: ObjectRepository,
+    repository: OntologyRepository,
     registry: FunctionRegistry,
     llm_client: OpenAI,
     model: str,

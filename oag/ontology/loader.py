@@ -1,4 +1,4 @@
-"""Load legacy domains or protocol-based domains."""
+"""Load declarative or provider-based domains."""
 
 from __future__ import annotations
 
@@ -8,15 +8,14 @@ from pathlib import Path
 
 import yaml
 
-from .adapters.json_file import JsonFileAdapter
-from .adapters.sqlite_table import SqliteTableAdapter
+from .adapters.sqlite_graph import SqlitePropertyGraphSource
 from .domain import DomainContext
 from .registry import FunctionRegistry
-from .repository import ObjectRepository
+from .repository import OntologyRepository
 from .schema import Ontology
 
 
-def load_domain(domain_dir: str | Path) -> tuple[Ontology, ObjectRepository, FunctionRegistry]:
+def load_domain(domain_dir: str | Path) -> tuple[Ontology, OntologyRepository, FunctionRegistry]:
     domain_dir = Path(domain_dir).resolve()
     manifest_path = domain_dir / "domain.yaml"
     manifest = _load_manifest(manifest_path) if manifest_path.is_file() else None
@@ -29,10 +28,12 @@ def load_domain(domain_dir: str | Path) -> tuple[Ontology, ObjectRepository, Fun
         ontology = Ontology.load(domain_dir / "ontology.yaml")
 
     registry = FunctionRegistry()
-    registry.register_adapter("json_file", JsonFileAdapter.factory(domain_dir))
-    registry.register_adapter("sqlite_table", SqliteTableAdapter.factory(domain_dir))
+    registry.register_source_adapter(
+        "sqlite_property_graph",
+        SqlitePropertyGraphSource.factory(domain_dir),
+    )
 
-    repository = ObjectRepository(ontology, registry)
+    repository = OntologyRepository(ontology, registry)
     if provider is not None:
         provider.register(DomainContext(
             domain_dir=domain_dir,
