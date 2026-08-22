@@ -30,7 +30,7 @@ class ToolExecutor:
             for tc, args, result in batch_results:
                 if on_result:
                     on_result(tc, args, result)
-            if result.needs_confirmation:
+            if result.needs_confirmation or result.needs_user_input:
                 break
         return results
 
@@ -40,13 +40,13 @@ class ToolExecutor:
             tool = self.harness.tools.get(tc.function.name)
             concurrency_safe = bool(tool and tool.policy and tool.policy.concurrency_safe)
             # 只有相邻的并发安全工具会被合并；写操作/确认/业务动作自然形成顺序屏障。
-            if concurrency_safe and batches and self.batch_is_concurrency_safe(batches[-1]):
+            if concurrency_safe and batches and self._batch_is_concurrency_safe(batches[-1]):
                 batches[-1].append((tc, args))
             else:
                 batches.append([(tc, args)])
         return batches
 
-    def batch_is_concurrency_safe(self, batch: list[tuple[Any, dict]]) -> bool:
+    def _batch_is_concurrency_safe(self, batch: list[tuple[Any, dict]]) -> bool:
         return all(
             bool((tool := self.harness.tools.get(tc.function.name)) and tool.policy and tool.policy.concurrency_safe)
             for tc, _ in batch
@@ -64,6 +64,7 @@ class ToolExecutor:
             context=ToolUseContext(
                 session_id=state.session_id,
                 messages=state.messages,
+                turn_count=state.turn_count,
                 confirmed=False,
                 cache_namespace=state.cache_namespace,
             ),
@@ -82,6 +83,7 @@ class ToolExecutor:
                     context=ToolUseContext(
                         session_id=state.session_id,
                         messages=state.messages,
+                        turn_count=state.turn_count,
                         confirmed=False,
                         cache_namespace=state.cache_namespace,
                     ),

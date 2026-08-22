@@ -1,203 +1,35 @@
 # OAG Agent
 
-OAG Agent 是一个本体驱动的在线智能体运行时。它直接加载 `ontology.yaml`，或从
-`DomainProvider` 获取领域最终提供的 `Ontology`，再将对象查询、规则执行、工作流推进、业务函数和用户确认
-统一封装为 LLM 可调用的工具。
+OAG Agent 是领域无关的本体增强智能体运行时。它接收 Provider 已经编译好的
+`Ontology`，把对象/关系访问、无副作用 Function、有副作用 Action、工具策略和会话循环
+装配成 LLM 可理解且可执行的 Agent。
 
-这个包本身定位为 Python runtime/library：调用方负责准备领域目录、OpenAI
-兼容客户端、模型名以及外层服务接口。
+OAG 不读取领域 YAML，不发现领域目录，不实现具体数据库 adapter，也不通过业务关键词猜测
+意图。UOM 等上层负责领域建模、编译、物理存储和具体业务实现。
 
-## 功能概览
+## 职责边界
 
-- 基于 `ontology.yaml` 构建领域对象、关系、规则、工作流和业务函数。
-- 自动注册查询、统计、搜索、规则、工作流、写入和业务函数工具。
-- 对需要确认的写操作、业务操作和用户提问提供确认流程。
-- 支持流式文本、reasoning、工具调用、展示动作和 SSE 事件转换。
-- 支持长上下文压缩、历史协议修复、工具输入 schema 校验。
-- 支持工具执行超时、Worker 策略限制、大工具结果落盘。
-- 支持通用工具错误守门，避免最终回答掩盖未恢复的工具错误。
-- Prompt 采用分层装配：静态领域摘要常驻，完整本体详情通过 `inspect` 按需获取。
+OAG 负责：
 
-## 安装与验证
+- Agent、流式事件、会话历史和用户确认流程。
+- Object、Relation、Function、Action、Rule、Workflow 的运行时元模型。
+- `DomainProvider`、`ObjectQuerySource`、`ObjectSearchSource`、`RelationSource` 和 `ActionRuntime` 协议。
+- `SourceManager` 与按 binding 访问逻辑数据的 `OntologyRepository`。
+- Prompt、工具注册、输入校验、执行策略、超时、缓存、审计和 trace。
+- LLM 重试、上下文估算、压缩和工具消息协议修复。
 
-```bash
-cd agent
-uv sync
-uv run pytest
-uv run python -m compileall -q oag
-```
+OAG 不负责：
 
-## 领域目录
+- `model.yaml` 或其他领域 DSL 的解析、合并与编译。
+- 领域关键词路由、固定业务意图分类或业务结果启发式判断。
+- SQLite/HTTP/第三方系统等具体 Source 实现。
+- ChangeSet、revision、retire、history 等领域数据治理语义。
+- 具体 Web UI、地图、表单实现或领域目录发现规则。
+- 绕过 Action 的通用业务 CRUD 工具。
 
-`load_domain()` 默认读取下面这种兼容领域目录：
+## Provider 协议
 
-```text
-my_domain/
-  ontology.yaml
-  data/
-    graph.db
-  functions/
-    __init__.py
-```
-
-`ontology.yaml` 描述领域模型。一个最小示例：
-
-```yaml
-name: AssetOps
-description: 资产运维领域
-
-data_sources:
-  operations:
-    type: sqlite_property_graph
-    mode: read_only
-    config:
-      database: data/graph.db
-
-objects:
-  Asset:
-    summary: 资产基础信息
-    mutability: read_only
-    binding:
-      source: operations
-      selector: {type: asset}
-    properties:
-      asset_id:
-        type: str
-        required: true
-        description: 资产编号
-      status:
-        type: str
-        description: 当前状态
-
-  WorkOrder:
-    summary: 工单
-    mutability: mutable
-    binding:
-      source: operations
-      selector: {type: work_order}
-    properties:
-      order_id:
-        type: str
-        required: true
-        description: 工单编号
-      asset_id:
-        type: str
-        description: 资产编号
-      status:
-        type: str
-        description: 工单状态
-
-functions:
-  lookup_asset:
-    summary: 查询资产详情
-    reads_objects: [Asset]
-    params:
-      asset_id:
-        type: str
-        description: 资产编号
-
-actions:
-  create_work_order:
-    display_name: 创建维修工单
-    summary: 为指定资产创建工单
-    description: 为指定资产创建工单
-    available_on: [Asset]
-    context_input: asset_id
-    inputs:
-      asset_id:
-        type: str
-        display_name: 资产
-        object_types: [Asset]
-        required: true
-    side_effects:
-      creates_objects: [WorkOrder]
-    confirmation: 创建维修工单
-    idempotency: required
-```
-
-`Function` 只描述无领域副作用的查询、计算和校验能力。会创建、修改或退役业务事实的
-能力必须建模为 `Action`，由领域注册的 `ActionRuntime` 负责准备表单、预览和执行；
-OAG 只读取公开副作用，不依赖领域内部的 ChangeSet 模板。
-
-对象可通过 `display_name`、`aliases` 和 `countable` 声明面向用户的名称映射。
-领域级对话与后台事件策略也可以由 ontology 统一提供：
-
-```yaml
-interaction_policies:
-  user_chat:
-    include_in_system_prompt: true
-    instructions:
-      - 对象级结论必须来自确定性领域函数。
-    intents:
-      impact:
-        keywords: [受影响, 受淹]
-        tools: [analyze_impacts]
-
-presentation_tools:
-  ui_show_objects:
-    summary: 在前端展示领域对象
-    description: 返回声明式地图动作，不修改领域数据
-    usage_prompt: 用户明确要求地图展示时调用
-    side_effect_scope: frontend_map
-    mutates_domain: false
-    object_scope: mappable
-    requires_confirmation: false
-
-event_policies:
-  ResultGenerated:
-    role: 领域事件智能体
-    allowed_tools: [analyze_impacts, ui_show_objects]
-    required_functions: [analyze_impacts]
-    automatic_map:
-      mode: when_relevant
-      tool: ui_show_objects
-      objects:
-        - object_type: ResultCell
-          filters: {result_id: latest}
-      allowed_action_types: [apply_result]
-      other_objects: on_user_request
-```
-
-`required_functions` 和自动地图工具必须包含在 `allowed_tools` 中，自动地图工具还必须
-存在于 `presentation_tools`，否则 ontology 加载时会失败。展示工具的 handler 和参数
-Schema 仍由适配器代码绑定；ontology 负责名称、用途、模型使用说明、副作用和对象范围。
-展示工具的 JSON 结果可以包含顶层 `presentation` 对象。主对话运行时会保留普通 `tool_result`，并额外
-发出 `{type: presentation, name: 工具名, payload: presentation}` 事件；Web 或桌面调用方据此执行声明式
-界面动作，不需要从 Agent 文本中猜测业务意图。
-事件 prompt 和运行时动作白名单应读取同一个 `event_policies` 定义，避免自然语言提示
-与执行约束漂移。策略引用的工具必须是内置工具、`functions`、`presentation_tools`，
-或在顶层 `runtime_tools` 中显式声明的外部运行时工具。
-
-`functions/__init__.py` 负责绑定 Python 实现：
-
-```python
-def register(registry, repository, ontology):
-    def lookup_asset(asset_id: str):
-        return repository.get_object("Asset", asset_id) or {"error": "not found"}
-
-    registry.register("lookup_asset", lookup_asset, ontology.functions["lookup_asset"])
-```
-
-领域的 `DomainProvider` 另行注册实现 `ActionRuntime` 协议的服务。该服务可以通过 Repository
-的写接口落库，但这些底层 CRUD 不作为 Function 暴露给 LLM。
-
-### 领域提供者协议
-
-当领域需要自行决定如何产生 Ontology 时，在目录中增加 `domain.yaml`：
-
-```text
-my_domain/
-  domain.yaml
-  provider.py
-  ...                    # provider 使用的文件由领域自行决定
-```
-
-```yaml
-schema: oag.domain.v1
-provider: provider:create_domain
-```
-
-工厂返回实现 `DomainProvider` 的对象：
+Provider 返回最终 `Ontology`，再绑定该本体声明的运行时实现：
 
 ```python
 from oag.ontology.domain import DomainContext
@@ -205,31 +37,119 @@ from oag.ontology.domain import DomainContext
 
 class Provider:
     def load_ontology(self):
-        # 可以读取、生成或从外部获取，OAG 不关心产生方式。
+        # 可以由领域 DSL 编译、代码构造或外部服务获取。
         return ontology
 
     def register(self, context: DomainContext):
-        # 注册该 Ontology 所需的 source adapter、runtime service 和函数实现。
-        context.registry.register(...)
-
-
-def create_domain(domain_dir):
-    return Provider()
+        context.sources.register("asset_api", source_factory)
+        context.bindings.register(
+            "lookup_asset",
+            lookup_asset,
+            context.ontology.functions["lookup_asset"],
+        )
+        context.bindings.register_action_runtime(action_runtime)
 ```
 
-加载顺序固定为：
+装配顺序是：
 
 ```text
-创建 provider
-  -> provider.load_ontology()
-  -> 用返回的 Ontology 创建 Repository
+provider.load_ontology()
+  -> SourceManager(ontology)
+  -> OntologyRepository(ontology, sources)
   -> provider.register(DomainContext)
+  -> 校验全部 Function 和 Action 已绑定实现
 ```
 
-`load_ontology()` 返回最终的 `Ontology`，不接收基础本体。它可以直接读取一个文件，也可以生成、合并或
-从外部服务取得本体；这些过程不属于 OAG 协议。`register()` 会收到同一个 Ontology 和基于它创建的
-Repository。OAG 只定义“提供本体、注册运行时”这一生命周期，不解释 provider 的私有文件。
-没有 `domain.yaml` 的既有领域仍通过 `functions.register(registry, repository, ontology)` 加载。
+`DomainContext` 只包含 `ontology`、`bindings`、`sources` 和 `repository`。Provider 自己持有
+目录、连接或部署配置，OAG 不假设领域来自文件系统。
+
+## 本体元模型
+
+- `ObjectTypeDef`：对象类型、属性和数据 binding。
+- `RelationTypeDef`：一等关系、端点类型、属性和数据 binding。
+- `FunctionDef`：无领域副作用的查询、计算或校验能力。
+- `ActionDef`：会改变业务状态的操作及其公开输入、副作用摘要。
+- `RuleDef`：确定性规则声明。
+- `WorkflowDef`：供模型理解的业务步骤和分支，不在 OAG 内保存业务进度。
+- `InteractionPolicyDef`：领域提供的稳定自然语言指令，不包含关键词意图路由。
+
+OAG 元模型中的 Object/Relation 必须声明 `binding.source`。Function 声明后必须由 Provider
+注册 callable；存在 Action 时必须注册 `ActionRuntime`。Action 的真实变更模板和事务语义
+属于领域实现，OAG 只读取公开契约。
+
+## 数据访问
+
+`OntologyRepository` 根据每个类型的 binding 调用命名 Source：
+
+```text
+OntologyRepository
+  -> SourceManager.require(binding.source, capability)
+  -> ObjectQuerySource / ObjectSearchSource / RelationSource
+  -> 外部系统或领域存储
+```
+
+逻辑协议包括对象/关系的 query、get，以及可选的 search 和写能力。OAG 不提供具体 adapter；统计和聚合
+应由领域 Function 或外部系统提供，不作为所有 Source 都必须实现的基础协议。
+Provider 可以从同一 Source 获取额外的领域能力并包装为自己的服务，但这些协议不能倒灌进 OAG。
+
+## Function 与 Action
+
+Function 始终按只读工具注册，适合查询、聚合、追溯和确定性校验。业务副作用只能经 Action：
+
+```text
+LLM -> request_action_input -> InteractionEvent
+UI  -> ActionRuntime.preview_action
+UI  -> 用户确认
+UI  -> ActionRuntime.execute_action
+```
+
+`get_available_actions` 和 `request_action_input` 是 OAG 根据 Action 目录生成的通用桥接工具。
+交互 payload 描述用户需要补充的输入，不绑定 Web 表单；具体渲染和 Action 接口由应用负责。
+
+## 工具执行
+
+所有主 Agent 和 Worker 工具调用都经过 `ToolExecutionPipeline`：
+
+1. 查找工具并校验 JSON 参数。
+2. 执行 Worker 权限和确认策略。
+3. 触发 pre-hook。
+4. 命中当前 Agent run 内的只读缓存。
+5. 执行本体前置条件。
+6. 带超时调用 handler，并把异常转成 blocked `ToolResult`。
+7. 截断过大的工具结果；启用结果读取能力时通过不透明 `result_ref` 持久化。
+8. 触发 post-hook、审计和 trace。
+
+`ToolRegistry` 拒绝同名覆盖，避免领域 Function 静默替换内置工具。Worker 不按任务文本分类，
+只看到 `ToolPolicy.worker_allowed=True` 的工具；需要用户确认或写入的工具默认不能由 Worker 执行。
+
+核心运行时工具只有 `ask_user`；核心本体工具是 `inspect`、`query` 和按模型需要注册的
+`query_relations`。`search` 只在 Source 声明搜索能力时注册，规则工具和 Action 工具只在本体
+具备对应能力时注册。`read_tool_result` 与 `dispatch_workers` 由 Harness 配置显式开启。
+
+## Agent 循环
+
+```text
+Agent.chat_stream
+  -> SessionStore
+  -> QueryLoop
+       -> sanitize messages
+       -> compact context when needed
+       -> LLM(messages + allowed tools)
+       -> ToolExecutionPipeline
+       -> confirmation pause/resume
+  -> stream Event / SSE dict
+```
+
+`allowed_tools` 是调用方显式传入的运行时工具范围，不是 OAG 的意图识别结果。`ask_user`
+通过独立的用户输入状态暂停并恢复会话，不借用写操作确认。Action 输入请求产生通用
+`InteractionEvent`，OAG 不解释应用如何渲染其 payload。
+
+## Hooks 与状态
+
+默认 hook 只包含通用横切策略：写工具确认和工具调用审计。领域复核和最终回答检查可以
+由调用方注册 hook，但 OAG 不内置中文短语、业务字段或成功/失败关键词启发式。
+
+`SessionStore` 使用 SQLite 保存 OAG 自己的对话状态；这不是领域数据 adapter。
 
 ## 最小运行示例
 
@@ -242,387 +162,47 @@ from oag.ontology.loader import load_domain
 from oag.runtime import HarnessConfig
 
 
-ontology, repository, registry = load_domain("my_domain")
-
-client = OpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="dummy",
-)
+provider = Provider(...)
+ontology, repository, bindings = load_domain(provider)
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
 
 harness = Harness(
-    ontology=ontology,
-    repository=repository,
-    registry=registry,
-    llm_client=client,
-    model="your-model",
-    config=HarnessConfig(
-        enable_write_confirmation=True,
-        runtime_context={"deployment": "local"},
-        append_system_prompt="请优先使用只读工具获取事实，再执行写入操作。",
-    ),
+    ontology,
+    repository,
+    bindings,
+    client,
+    "your-model",
+    HarnessConfig(enable_write_confirmation=True),
 )
+agent = Agent(harness, client, "your-model")
 
-agent = Agent(harness, client, model="your-model")
-
-for event in agent.chat_stream("查询资产 A1 的状态", session_id="demo"):
+for event in agent.chat_stream("查询资产 A1", session_id="demo"):
     print(event)
 ```
 
-如果工具需要用户确认，`chat_stream()` 会返回确认事件；调用方应保存
-`session_id`，再调用：
-
-```python
-for event in agent.confirm_tool("demo", approved=True):
-    print(event)
-```
-
-## Prompt 分层
-
-`Harness.build_system_prompt()` 会组装以下层：
-
-- `base_system_prompt`：领域身份和领域说明。
-- `ontology_summary`：对象、关系、规则、工作流、函数摘要。
-- `tool_usage_rules`：通用工具选择规则。
-- `interaction_policies`：ontology 声明并标记为常驻的领域交互策略。
-- `runtime_context`：当前运行模式、审计、轮次限制、部署上下文等动态信息。
-- `append_system_prompt`：调用方追加的部署级临时策略；稳定领域策略优先放入 ontology。
-
-默认情况下不会把完整函数和对象定义塞进 system prompt。模型需要详情时应调用
-`inspect` 工具。若要兼容旧行为，可以设置：
-
-```python
-HarnessConfig(include_ontology_full_context=True)
-```
-
-## 架构设计
-
-OAG Agent 的核心设计目标是把“领域知识、LLM 对话循环、工具执行策略、会话状态”
-拆开。LLM 负责理解用户意图和选择工具；领域事实、业务规则、写入约束、确认流程
-放在模型外侧的确定性 runtime 里。
-
-整体分层如下：
-
-```text
-Agent
-  ├─ QueryLoop
-  ├─ ConfirmationFlow
-  └─ SessionStore
-
-Harness
-  ├─ OntologyRuntime
-  │   ├─ OntologyPromptBuilder
-  │   ├─ OntologyInspector
-  │   ├─ OntologyValidator
-  │   ├─ RuleEngine
-  │   ├─ WorkflowRuntime
-  │   └─ OntologyToolRegistrar
-  ├─ DataExecutor / OntologyRepository
-  ├─ ToolRegistry
-  ├─ ToolExecutionPipeline
-  ├─ RuntimeTools
-  ├─ ContextManager
-  ├─ HookRegistry / AuditLog
-  └─ TraceRecorder
-```
-
-### Agent 层
-
-`Agent` 是调用方面向的会话 API。它负责：
-
-- 接收用户消息并加载会话历史。
-- 首次会话时生成并写入 system prompt。
-- 将对话执行交给 `QueryLoop`。
-- 在工具需要确认时保存 pending 状态。
-- 用户确认或拒绝后交给 `ConfirmationFlow` 继续。
-- 持久化和读取历史记录。
-- 将内部事件转换成 SSE 友好的字典格式。
-
-`Agent` 不直接做工具策略判断，也不直接理解 ontology。它更像会话协调器。
-
-### Harness 层
-
-`Harness` 是模型外侧的执行边界。它把 ontology、工具、上下文管理、hook、trace 和
-执行管线组合起来，并向 `QueryLoop` 暴露少量稳定接口：
-
-- `build_system_prompt()`
-- `build_tools()`
-- `execute_tool()`
-- `maybe_compact()`
-- `force_compact()`
-- `run_stop_check()`
-
-这样 `QueryLoop` 不需要知道工具背后是数据库查询、业务函数、规则引擎还是工作流。
-所有工具调用都必须经过 `Harness.execute_tool()`，从而保证校验、确认、审计、超时、
-缓存和大结果处理不会被绕过。
-
-### OntologyRuntime 层
-
-`OntologyRuntime` 是本体能力的 facade。它不直接承载大量逻辑，而是把职责分给几个
-小模块：
-
-- `OntologyPromptBuilder`：构建 prompt 静态层和 ontology 摘要。
-- `OntologyInspector`：按需返回函数、对象、规则的完整定义。
-- `OntologyValidator`：在工具执行前做领域约束校验。
-- `RuleEngine`：执行确定性业务规则。
-- `WorkflowRuntime`：启动、推进工作流，并暴露 SLA 定义。
-- `OntologyToolRegistrar`：把 ontology 能力注册成工具。
-
-这个拆法的好处是：ontology schema 增长时，不会把所有逻辑塞进一个大 runtime 类里；
-后续要扩展规则、工作流或 prompt 策略，也能在对应模块里改。
-
-### DataExecutor、OntologyRepository 与 Source Adapters
-
-`DataExecutor` 是工具层的数据执行器。它接收 `query`、`count`、`query_relations`、
-`mutate`、`search`、`describe` 等工具调用；开启 `enable_analysis_tools` 后还会接收
-`pivot`、`distribution`，然后交给
-`OntologyRepository`。
-
-`OntologyRepository` 是对象和关系的数据访问边界，也是领域函数拿到的数据入口。
-每个对象或关系通过 `binding.source` 绑定到 `data_sources` 中的命名数据源；同一 source
-adapter 可同时映射多个逻辑对象和关系类型。Repository 向上提供统一接口：
-
-- `query_objects / count_objects / get_object`
-- `query_relations / count_relations / get_relation`
-- `search_text(keyword, object_types, limit)`
-- `create_object / update_object / retire_object`
-- `create_relation / update_relation / retire_relation`
-
-内置 source adapter：
-
-- `sqlite_property_graph`：把已有 SQLite 节点表和边表映射成逻辑对象与一等关系；
-  物理表名和字段映射留在数据源配置中，不泄漏给智能体。
-
-复杂或非标准数据源用扩展点表达：
-
-- 自定义 source adapter：通过 `FunctionRegistry.register_source_adapter(source_type, factory)` 注册。
-  适合一类可复用数据源，例如 HTTP API、MySQL 表、对象存储文件或运行期内存表。
-Source adapter 的职责是把外部数据源包装成统一对象/关系接口；领域级校验不放在 adapter
-里，而是放在 `OntologyValidator`。这样数据源实现可以保持窄而稳定，面向用户的错误
-消息、可变性和状态流转约束由工具执行管线统一处理。
-
-基础读取契约是 `SourceAdapter`。写入、批量图查询、原子 ChangeSet 和历史查询分别由
-`WritableSource`、`BulkGraphSource`、`AtomicGraphSource`、`HistorySource` 结构化协议表达；
-adapter 只实现数据源真实支持的能力。Provider 需要向应用暴露 workspace 等运行时对象时，
-使用 `register_service/get_service`，不把服务伪装成数据 resolver。
-
-### ToolRegistry 与 ToolDef
-
-`ToolRegistry` 保存所有可供模型调用的工具定义。每个工具用 `ToolDef` 描述：
-
-- `name`：工具名。
-- `description`：能力摘要。
-- `parameters`：OpenAI function calling JSON schema。
-- `handler`：实际执行函数。
-- `usage_prompt`：复杂工具的使用约束。
-- `policy`：执行策略。
-
-`ToolRegistry.build_tools()` 会把内部 `ToolDef` 转成 OpenAI 工具 schema，并缓存稳定
-结果。注册新工具时版本号递增，缓存自动失效。
-
-`usage_prompt` 的设计意图是让复杂工具自描述，而不是把所有规则都写进全局 prompt。
-例如 `ask_user` 可以说明什么时候才应该问用户，业务函数可以说明调用前置条件和副作用。
-
-### ToolExecutionPipeline
-
-`ToolExecutionPipeline` 是工具执行的唯一通道。一次工具调用会经过这些步骤：
-
-1. 查找工具定义。
-2. 记录 trace。
-3. 校验 JSON 参数 schema。
-4. 执行 ontology 约束校验。
-5. 检查 worker/main、只读、写入、确认等策略。
-6. 命中只读缓存时直接返回。
-7. 触发 pre-hook。
-8. 带超时执行 handler。
-9. 截断或持久化过大的工具结果。
-10. 写入只读缓存。
-11. 触发 post-hook 和审计。
-12. 返回统一的 `ToolResult`。
-
-这个管线让工具 handler 可以保持简单。handler 只关心“怎么做事”，不需要自己处理
-确认、缓存、审计、超时和大结果落盘。
-
-### QueryLoop
-
-`QueryLoop` 是主 LLM 回合循环。它负责：
-
-- 在每轮请求前修复历史协议问题。
-- 必要时压缩上下文。
-- 向模型发送 messages 和 tools。
-- 消费流式响应，产出文本、reasoning 和 debug 事件。
-- 聚合 streaming tool calls。
-- 将 assistant tool-call envelope 和 tool result 按 OpenAI 协议写回历史。
-- 处理非法 JSON 参数，把错误作为工具结果反馈给模型。
-- 在确认工具出现时暂停本轮，并保存现场。
-- 最终回答后运行 stop check。
-
-`QueryLoop` 不直接执行工具逻辑，而是调用 `Harness.execute_tool()`。这保证主 agent、
-确认恢复流程和 worker 都共享同一套工具执行语义。
-
-### ConfirmationFlow
-
-写工具和 `ask_user` 可能需要暂停等待用户确认。Function 始终按只读工具注册；业务
-Action 的实际写入通过 `ActionRuntime.execute_action` 进入领域审计和并发校验，不伪装成
-Function。通用工具是否确认由 `ToolPolicy` 决定。`ConfirmationFlow` 负责：
-
-- 处理用户批准或拒绝。
-- 为被拒绝工具写入 tool result，避免破坏 OpenAI tool-call 协议。
-- 恢复 pending 时的 `RunState`。
-- 继续交给 `QueryLoop` 执行后续回合。
-
-当模型一次返回多个工具调用，而前一个工具需要确认时，后续未执行的工具调用会被写入
-“skipped”结果。这样历史始终满足“每个 tool_call_id 都有对应 tool result”的协议。
-
-### SessionStore 与 Message Sanitizer
-
-`SessionStore` 使用 SQLite 保存会话消息。读取历史时会调用 message sanitizer 修复：
-
-- 孤立的 tool result。
-- 缺失的 tool result。
-- 重复 tool result。
-- 空 assistant 消息。
-
-保存和运行中修复会更保守，避免在 pending confirmation 状态下提前补齐工具结果，
-破坏等待确认的现场。
-
-### ContextManager
-
-`ContextManager` 负责上下文长度控制：
-
-- 估算消息 token。
-- 对旧工具结果做轻量压缩。
-- 在接近上下文窗口时调用 LLM 摘要旧历史。
-- 保留 system prompt 和最近消息。
-- 调整压缩边界，避免 assistant tool call 和 tool result 被拆开。
-- 遇到 context overflow 时支持强制压缩并重试。
-
-压缩后的历史会插入 `[前置对话摘要]`，同时保留最近交互，让模型能继续任务而不丢关键状态。
-
-### Prompt 设计
-
-Prompt 不再采用“大本体全量前置注入”作为默认模式。默认 system prompt 只常驻：
-
-- 领域身份。
-- ontology 摘要。
-- 通用工具规则。
-- 动态运行时上下文。
-- 调用方追加策略。
-
-完整函数、对象、规则详情通过 `inspect` 工具按需获取。这样可以减少 prompt 体积，
-也能避免 ontology 变大后每轮请求都携带大量不相关细节。
-
-静态 prompt sections 会缓存；动态 runtime context 每次构建。这样既保持稳定前缀，
-也允许部署信息、运行模式等动态状态及时进入 prompt。
-
-### Worker / Subagent
-
-`dispatch_workers` 用于并行处理独立子任务。Worker 的设计边界更窄：
-
-- 不继承主会话完整历史。
-- 只接收主 agent 显式传入的 `context`。
-- 使用精简 system prompt：worker 身份、领域摘要、背景信息和执行要求。
-- 根据任务类型过滤工具列表。
-- 通过 `ToolUseContext(source="worker")` 进入同一条工具执行管线。
-- 默认不允许执行需要用户确认或写入的工具。
-
-这能避免 worker 误用主会话隐含上下文，也降低并行任务的 prompt 成本。
-
-### Hooks、Audit 和 Trace
-
-运行时提供三个侧面的可观测与控制机制：
-
-- `HookRegistry`：在工具前后、查询完成等时机插入策略。
-- `AuditLog`：记录工具调用和结果摘要。
-- `TraceRecorder`：记录 agent turn、工具开始/结束、阻止原因、缓存命中等事件。
-
-每次向 LLM 发起请求前，QueryLoop 会记录 `context_usage` trace 事件。该事件按
-system prompt、工具 schema、消息历史和剩余窗口拆分 token 估算，并列出最大的工具
-schema 与工具结果，便于定位上下文膨胀来源。HTTP 服务同时提供
-`GET /agent/context?session_id=...`，返回当前会话的结构化 context usage 数据。
-
-默认 hook 包括写入确认、审计记录、业务复核和最终回答完整性检查。最终回答检查会识别
-结构化工具结果中的 `error`、`blocked`、`paused` 等状态；如果同一轮对话中存在未被后续
-成功调用恢复的工具错误，模型不能把任务描述成已完成、已成功或已给出可执行建议。明确
-说明失败或需要人工处理的回答仍然允许。
-
-### 一次用户请求的流转
-
-```text
-user message
-  -> Agent.chat_stream()
-  -> SessionStore.get()
-  -> 首次会话构建 system prompt
-  -> QueryLoop.run()
-  -> sanitize messages
-  -> maybe compact
-  -> LLM request(messages + tools)
-  -> final answer
-       -> stop check
-       -> SessionStore.save()
-  -> tool calls
-       -> append assistant tool-call envelope
-       -> Harness.execute_tool()
-       -> ToolExecutionPipeline
-       -> append tool result
-       -> next LLM turn
-  -> confirmation required
-       -> save pending state
-       -> wait for Agent.confirm_tool()
-       -> ConfirmationFlow
-       -> QueryLoop continues
-```
-
-这个流转的关键不变量是：模型看到的历史始终满足工具协议；所有工具执行都经过同一条
-pipeline；业务规则和副作用控制都在模型外侧。
-
-## 工具与策略
-
-工具由 `ToolDef` 描述：
-
-- `description`：工具能力摘要。
-- `parameters`：OpenAI function calling JSON schema。
-- `usage_prompt`：复杂工具的使用约束，会拼入工具描述。
-- `policy`：只读、是否需要确认、是否允许 Worker、是否破坏性、超时等策略。
-
-领域函数可以在 `ontology.yaml` 中声明 `usage_prompt`。这比把所有细节塞进全局
-prompt 更清晰，也更容易按函数维护。
-
-内置工具包括：
-
-- `inspect`
-- `query`
-- `count`
-- `query_relations`
-- `describe`
-- `mutate`
-- `search`
-- `apply_rule`
-- `apply_rule_batch`
-- `start_workflow`
-- `check_sla`
-- `summarize_progress`
-- `ask_user`
-- `dispatch_workers`
-
-`pivot`、`distribution` 属于可选分析工具，需通过 `HarnessConfig(enable_analysis_tools=True)` 开启。
-
-实际可用工具取决于 ontology 中是否声明了关系、规则、工作流和业务函数。
-
-## 运行时行为
-
-- `SessionStore` 持久化会话历史，并在读取时修复孤立工具结果、缺失工具结果等协议问题。
-- `ContextManager` 会在上下文变长时压缩旧历史，同时保护 system prompt 和最近工具调用对。
-- `ToolExecutionPipeline` 统一处理工具校验、确认、策略限制、缓存、审计、超时和大结果落盘。
-- Stop check 会阻止最终回答把未恢复的结构化工具错误包装成成功结果。
-- Worker 只接收精简 prompt、显式传入的 `context` 和经过过滤的工具列表，不继承主会话完整历史。
-
-## 测试
+## 源码职责清单
+
+本轮按文件逐一检查后的归属如下：
+
+- `agent.py`：会话 API；`harness.py`：运行时门面。
+- `llm/*`：重试、上下文压缩和用量估算。
+- `loop/query_loop.py`：主回合状态循环；`response_parser.py`：完整/流式模型响应解析；
+  `tool_call_coordinator.py`：工具批次、结果消息、确认和用户输入暂停；`tool_executor.py`：同回合工具并发；
+  `confirmation_flow.py`：暂停后的恢复；`worker.py`：受策略限制的独立子任务。
+- `ontology/schema.py`：元模型；`domain.py`/`loader.py`：Provider 生命周期；
+  `source.py`/`repository.py`：逻辑数据协议；`bindings.py`：Function/ActionRuntime 实现绑定。
+- `ontology/data_executor.py`：查询和 Function 的统一序列化；`tool_registrars.py`：按查询、规则、
+  Function、Action/交互分别注册工具；`runtime.py`：本体能力门面。
+- `ontology/prompt_builder.py`、`inspector.py`、`validators.py`、`rules.py`：各自的确定性能力。
+- `runtime/*`：配置、状态、事件、hook、会话、trace 和大结果存储。
+- `tools/*`：工具定义、注册、执行管线和 Agent 控制工具。
+
+已删除职责不成立的文件：具体数据库 adapters、伪工作流状态运行时和关键词式 stop check。
+
+## 验证
 
 ```bash
-cd agent
+uv sync
 uv run pytest
 uv run python -m compileall -q oag
 ```
-
-测试覆盖 harness runtime、工具策略、确认流程、工具错误守门、上下文压缩、历史修复、
-工具超时、大结果落盘和 prompt 分层等行为。

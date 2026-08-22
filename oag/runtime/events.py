@@ -16,8 +16,26 @@ class Event:
 
 @dataclass
 class TextEvent(Event):
+    """A complete assistant message produced outside an LLM response stream."""
+
     type: str = "text"
     content: str = ""
+
+
+@dataclass
+class AssistantDeltaEvent(Event):
+    """A provisional chunk of the current LLM assistant turn."""
+
+    type: str = "assistant_delta"
+    content: str = ""
+
+
+@dataclass
+class AssistantEndEvent(Event):
+    """Classify the preceding assistant deltas once the turn is complete."""
+
+    type: str = "assistant_end"
+    kind: str = "final"
 
 
 @dataclass
@@ -37,10 +55,10 @@ class ToolResultEvent(Event):
 
 
 @dataclass
-class PresentationEvent(Event):
-    """A tool returned a frontend presentation payload."""
+class InteractionEvent(Event):
+    """A tool requested a domain-neutral user interaction."""
 
-    type: str = "presentation"
+    type: str = "interaction"
     name: str = ""
     payload: dict = field(default_factory=dict)
 
@@ -50,13 +68,6 @@ class CompactEvent(Event):
     type: str = "compact"
     before_tokens: int = 0
     after_tokens: int = 0
-
-
-@dataclass
-class HookBlockedEvent(Event):
-    type: str = "hook_blocked"
-    hook_event: str = ""
-    reason: str = ""
 
 
 @dataclass

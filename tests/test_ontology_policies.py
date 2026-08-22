@@ -5,10 +5,10 @@ import json
 import pytest
 from pydantic import ValidationError
 
+from oag.ontology.bindings import RuntimeBindings
 from oag.ontology.inspector import OntologyInspector
 from oag.ontology.prompt_builder import OntologyPromptBuilder
-from oag.ontology.registry import FunctionRegistry
-from oag.ontology.schema import Ontology
+from oag.ontology.schema import Ontology, Precondition
 
 
 def make_policy_ontology() -> Ontology:
@@ -21,20 +21,6 @@ def make_policy_ontology() -> Ontology:
                 "binding": {"source": "memory"},
             },
         },
-        "functions": {
-            "analyze": {
-                "summary": "分析结果",
-            },
-        },
-        "presentation_tools": {
-            "ui_show_objects": {
-                "summary": "展示结果对象",
-                "description": "在前端展示领域对象。",
-                "side_effect_scope": "frontend_map",
-                "object_scope": "listed",
-                "allowed_objects": ["ResultCell"],
-            },
-        },
         "interaction_policies": {
             "user_chat": {
                 "description": "用户交互",
@@ -42,29 +28,11 @@ def make_policy_ontology() -> Ontology:
                 "instructions": ["只使用已验证的领域事实。"],
             },
         },
-        "event_policies": {
-            "ResultGenerated": {
-                "role": "领域事件智能体",
-                "allowed_tools": ["analyze", "ui_show_objects"],
-                "required_functions": ["analyze"],
-                "automatic_map": {
-                    "mode": "when_relevant",
-                    "tool": "ui_show_objects",
-                    "objects": [{
-                        "object_type": "ResultCell",
-                        "filters": {"result_id": "latest"},
-                        "refresh": True,
-                    }],
-                    "allowed_action_types": ["apply_result"],
-                    "other_objects": "on_user_request",
-                },
-            },
-        },
     })
 
 
 def test_interaction_policy_is_injected_into_system_prompt():
-    builder = OntologyPromptBuilder(make_policy_ontology(), FunctionRegistry())
+    builder = OntologyPromptBuilder(make_policy_ontology(), RuntimeBindings())
 
     prompt = builder.build_system_prompt()
 
@@ -72,76 +40,27 @@ def test_interaction_policy_is_injected_into_system_prompt():
     assert "只使用已验证的领域事实" in prompt
 
 
-def test_event_prompt_is_rendered_from_typed_policy():
-    builder = OntologyPromptBuilder(make_policy_ontology(), FunctionRegistry())
+def test_inspect_exposes_interaction_policy():
+    ontology = make_policy_ontology()
+    inspector = OntologyInspector(ontology, RuntimeBindings())
 
-    prompt = builder.build_event_prompt(
-        "ResultGenerated", {"event_type": "ResultGenerated", "event_id": "evt_1"},
-    )
+    result = json.loads(inspector.inspect("user_chat"))
 
-    assert "必须调用以下函数：analyze" in prompt
-    assert '"object_type": "ResultCell"' in prompt
-    assert "只有用户在普通对话中明确请求时才可展示" in prompt
+    assert result["kind"] == "interaction_policy"
+    assert result["instructions"] == ["只使用已验证的领域事实。"]
 
 
-def test_event_policy_rejects_required_function_outside_allowlist():
-    with pytest.raises(ValidationError, match="required_functions must be included"):
+@pytest.mark.parametrize("unsupported_field", ["presentation_tools", "event_policies"])
+def test_ontology_rejects_runtime_or_ui_specific_policy_fields(unsupported_field):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         Ontology.model_validate({
             "name": "InvalidPolicyDomain",
-            "event_policies": {
-                "ResultGenerated": {
-                    "allowed_tools": [],
-                    "required_functions": ["analyze"],
-                },
-            },
+            unsupported_field: {"unsupported": {}},
         })
 
 
-def test_inspect_exposes_event_policy():
-    ontology = make_policy_ontology()
-    inspector = OntologyInspector(ontology, FunctionRegistry())
-
-    result = json.loads(inspector.inspect("ResultGenerated"))
-
-    assert result["kind"] == "event_policy"
-    assert result["required_functions"] == ["analyze"]
-
-
-def test_inspect_exposes_presentation_tool():
-    ontology = make_policy_ontology()
-    inspector = OntologyInspector(ontology, FunctionRegistry())
-
-    result = json.loads(inspector.inspect("ui_show_objects"))
-
-    assert result["kind"] == "presentation_tool"
-    assert result["side_effect_scope"] == "frontend_map"
-    assert result["mutates_domain"] is False
-
-
-def test_event_policy_rejects_unknown_presentation_tool():
-    with pytest.raises(ValidationError, match="unknown presentation tool"):
-        Ontology.model_validate({
-            "name": "InvalidPresentationDomain",
-            "data_sources": {"memory": {"type": "memory"}},
-            "objects": {"ResultCell": {"summary": "结果单元", "binding": {"source": "memory"}}},
-            "functions": {"analyze": {"summary": "分析结果"}},
-            "event_policies": {
-                "ResultGenerated": {
-                    "allowed_tools": ["analyze", "ui_missing"],
-                    "required_functions": ["analyze"],
-                    "automatic_map": {
-                        "mode": "always",
-                        "tool": "ui_missing",
-                        "objects": [{"object_type": "ResultCell"}],
-                        "allowed_action_types": ["apply_result"],
-                    },
-                },
-            },
-        })
-
-
-def test_interaction_policy_rejects_unknown_tool():
-    with pytest.raises(ValidationError, match="interaction policy user_chat.map references unknown tools"):
+def test_interaction_policy_rejects_keyword_intent_routing():
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         Ontology.model_validate({
             "name": "InvalidInteractionDomain",
             "interaction_policies": {
@@ -155,3 +74,71 @@ def test_interaction_policy_rejects_unknown_tool():
                 },
             },
         })
+
+
+def test_nested_metamodel_definitions_reject_unknown_fields():
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Ontology.model_validate({
+            "name": "StrictDomain",
+            "data_sources": {"memory": {"type": "memory"}},
+            "objects": {
+                "Result": {
+                    "binding": {"source": "memory"},
+                    "unknown_policy": True,
+                },
+            },
+        })
+
+
+@pytest.mark.parametrize("section", ["properties", "object", "relation"])
+def test_deprecated_is_not_part_of_the_oag_metamodel(section):
+    payload = {
+        "name": "StrictDomain",
+        "data_sources": {"memory": {"type": "memory"}},
+        "objects": {
+            "Result": {
+                "binding": {"source": "memory"},
+                "properties": {"status": {"type": "str"}},
+            },
+        },
+        "relations": {
+            "points_to": {
+                "binding": {"source": "memory"},
+                "from_types": ["Result"],
+                "to_types": ["Result"],
+            },
+        },
+    }
+    if section == "properties":
+        payload["objects"]["Result"]["properties"]["status"]["deprecated"] = True
+    elif section == "object":
+        payload["objects"]["Result"]["deprecated"] = True
+    else:
+        payload["relations"]["points_to"]["deprecated"] = True
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        Ontology.model_validate(payload)
+
+
+def test_precondition_rejects_unsupported_operator():
+    with pytest.raises(ValidationError):
+        Precondition(object="Result", field="status", operator="ne", value="bad")
+
+
+def test_precondition_field_filter_requires_an_explicit_value_source():
+    with pytest.raises(ValidationError, match="value or value_from_param"):
+        Precondition(object="Result", field="id", operator="exists")
+
+
+def test_workflow_can_reference_an_action():
+    ontology = Ontology.model_validate({
+        "name": "ActionWorkflow",
+        "actions": {"approve": {"display_name": "Approve"}},
+        "workflows": {
+            "approval": {
+                "steps": [{"name": "Approval", "action": "approve"}],
+            },
+        },
+    })
+
+    assert ontology.workflows["approval"].steps[0].action == "approve"

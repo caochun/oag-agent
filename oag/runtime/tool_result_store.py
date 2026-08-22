@@ -5,65 +5,71 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
 
-def persist_large_tool_result(*, storage_dir: str | None,
-                              session_id: str,
-                              tool_name: str,
-                              content: str,
-                              preview_chars: int) -> str:
-    safe_session = _safe_name(session_id or "default")
-    safe_tool = _safe_name(tool_name)
-    result_dir = _base_dir(storage_dir) / safe_session
-    result_dir.mkdir(parents=True, exist_ok=True)
+class ToolResultStore:
+    """Keep large tool results behind opaque references.
 
-    path = result_dir / f"{safe_tool}.txt"
-    if path.exists():
-        stem = path.stem
-        suffix = 2
-        while path.exists():
-            path = result_dir / f"{stem}-{suffix}.txt"
-            suffix += 1
+    The filesystem is an implementation detail of OAG.  Models receive only
+    ``result_ref`` values, so a tool cannot accidentally expose server paths.
+    """
 
-    path.write_text(content, encoding="utf-8")
-    return json.dumps({
-        "persisted": True,
-        "path": str(path),
-        "original_chars": len(content),
-        "preview_chars": preview_chars,
-        "preview": content[:preview_chars],
-        "hint": "完整工具结果已保存到 path，当前仅返回预览。如需完整内容，请调用 read_tool_result；不要用领域 read_document 读取该 path。",
-    }, ensure_ascii=False)
+    def __init__(self, storage_dir: str | None = None):
+        self.storage_dir = storage_dir
+        self._refs: dict[str, Path] = {}
 
+    def persist(self, *, session_id: str, tool_name: str, content: str,
+                preview_chars: int, storage_dir: str | None = None) -> str:
+        safe_session = _safe_name(session_id or "default")
+        safe_tool = _safe_name(tool_name)
+        result_dir = _base_dir(storage_dir or self.storage_dir) / safe_session
+        result_dir.mkdir(parents=True, exist_ok=True)
 
-def read_persisted_tool_result(*, path: str,
-                               max_chars: int = 12000,
-                               storage_dir: str | None = None) -> str:
-    display_path = Path(path).expanduser()
-    requested = display_path.resolve()
-    allowed_roots = [_base_dir(None).resolve()]
-    if storage_dir:
-        allowed_roots.append(_base_dir(storage_dir).resolve())
-    if not any(_is_relative_to(requested, root) for root in allowed_roots):
-        return _json_error(
-            "只能读取 OAG 持久化工具结果目录下的文件，不能读取普通业务文档或任意本地文件。",
-            path=str(requested),
-            allowed_roots=[str(root) for root in allowed_roots],
+        path = result_dir / f"{safe_tool}.txt"
+        if path.exists():
+            stem = path.stem
+            suffix = 2
+            while path.exists():
+                path = result_dir / f"{stem}-{suffix}.txt"
+                suffix += 1
+        path.write_text(content, encoding="utf-8")
+
+        result_ref = f"result:{uuid.uuid4().hex}"
+        self._refs[result_ref] = path
+        return json.dumps({
+            "persisted": True,
+            "result_ref": result_ref,
+            "original_chars": len(content),
+            "preview_chars": preview_chars,
+            "preview": content[:preview_chars],
+            "hint": "完整工具结果已保存；需要更多内容时调用 read_tool_result，并传入 result_ref。",
+        }, ensure_ascii=False)
+
+    def read(self, *, result_ref: str, max_chars: int = 12000) -> str:
+        path = self._refs.get(str(result_ref or ""))
+        if path is None:
+            return _json_error("未找到 OAG 工具结果引用。")
+        return _read_result_file(
+            path,
+            max_chars=_bounded_max_chars(max_chars),
+            display_ref=result_ref,
         )
-    if not requested.exists() or not requested.is_file():
-        return _json_error("未找到持久化工具结果文件。", path=str(requested))
-    max_chars = max(1000, min(int(max_chars or 12000), 50000))
-    content = requested.read_text(encoding="utf-8", errors="replace")
+
+
+def _read_result_file(path: Path, *, max_chars: int,
+                      display_ref: str) -> str:
+    content = path.read_text(encoding="utf-8", errors="replace")
     truncated = len(content) > max_chars
     return json.dumps({
-        "path": str(display_path),
+        "result_ref": display_ref,
         "chars": len(content),
         "returned_chars": min(len(content), max_chars),
         "truncated": truncated,
         "content": content[:max_chars],
-        "hint": "这是通用持久化工具结果，不是领域文档；不要再用领域 read_document 读取该 path。",
+        "hint": "这是 OAG 持久化的工具结果。",
     }, ensure_ascii=False)
 
 
@@ -78,12 +84,8 @@ def _base_dir(storage_dir: str | None) -> Path:
     return Path(tempfile.gettempdir()) / "oag-tool-results"
 
 
-def _is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
+def _bounded_max_chars(value: int) -> int:
+    return max(1000, min(int(value or 12000), 50000))
 
 
 def _json_error(message: str, **extra: Any) -> str:

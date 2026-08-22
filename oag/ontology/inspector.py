@@ -9,22 +9,22 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .registry import FunctionRegistry
+from .bindings import RuntimeBindings
 from .schema import Ontology
 
 
 class OntologyInspector:
     """Renders detailed ontology definitions for the inspect tool."""
 
-    def __init__(self, ontology: Ontology, registry: FunctionRegistry):
+    def __init__(self, ontology: Ontology, bindings: RuntimeBindings):
         self.ontology = ontology
-        self.registry = registry
+        self.bindings = bindings
 
     def inspect(self, target: str) -> str:
         if not target:
             return json.dumps({"error": "需要参数 name"}, ensure_ascii=False)
 
-        fdef = self.registry.get_def(target)
+        fdef = self.bindings.get_def(target)
         if fdef:
             if not fdef.user_visible or target in set(self.ontology.excluded_tools or []):
                 return json.dumps({"error": f"未找到: {target}"}, ensure_ascii=False)
@@ -34,9 +34,6 @@ class OntologyInspector:
                 "summary": fdef.summary,
                 "description": fdef.description,
                 "usage_prompt": fdef.usage_prompt,
-                "group": fdef.group,
-                "depends_on": fdef.depends_on,
-                "hint": fdef.hint,
                 "timeout_seconds": fdef.timeout_seconds,
                 "concurrency_safe": fdef.concurrency_safe,
                 "reads_objects": fdef.reads_objects,
@@ -95,15 +92,6 @@ class OntologyInspector:
                     for p, d in obj.properties.items()
                 },
             }
-            if obj.status_transitions:
-                info["status_transitions"] = obj.status_transitions
-            if obj.excluded_functions:
-                info["excluded_functions"] = obj.excluded_functions
-            if obj.constraints:
-                info["constraints"] = [
-                    {"when": c.when, "excluded_functions": c.excluded_functions, "reason": c.reason}
-                    for c in obj.constraints
-                ]
             rules = self.ontology.get_rules_for_object(target)
             if rules:
                 info["applicable_rules"] = {
@@ -152,28 +140,20 @@ class OntologyInspector:
                 ],
             }, ensure_ascii=False, default=str)
 
-        presentation_tool = self.ontology.presentation_tools.get(target)
-        if presentation_tool:
-            return json.dumps({
-                "kind": "presentation_tool",
-                "name": target,
-                **presentation_tool.model_dump(),
-            }, ensure_ascii=False, default=str)
-
-        event_policy = self.ontology.event_policies.get(target)
-        if event_policy:
-            return json.dumps({
-                "kind": "event_policy",
-                "name": target,
-                **event_policy.model_dump(),
-            }, ensure_ascii=False, default=str)
-
         interaction_policy = self.ontology.interaction_policies.get(target)
         if interaction_policy:
             return json.dumps({
                 "kind": "interaction_policy",
                 "name": target,
                 **interaction_policy.model_dump(),
+            }, ensure_ascii=False, default=str)
+
+        workflow = self.ontology.workflows.get(target)
+        if workflow:
+            return json.dumps({
+                "kind": "workflow",
+                "name": target,
+                **workflow.model_dump(),
             }, ensure_ascii=False, default=str)
 
         return json.dumps({"error": f"未找到: {target}"}, ensure_ascii=False)

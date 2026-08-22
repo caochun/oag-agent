@@ -12,8 +12,8 @@ from typing import Callable
 from openai import OpenAI
 
 from ..llm.context import ContextManager
+from ..ontology.bindings import RuntimeBindings
 from ..ontology.data_executor import DataExecutor
-from ..ontology.registry import FunctionRegistry
 from ..ontology.repository import OntologyRepository
 from ..ontology.rules import RuleEngine
 from ..ontology.runtime import OntologyRuntime
@@ -22,13 +22,10 @@ from ..tools.pipeline import ToolExecutionPipeline, ToolResult
 from ..tools.registry import ToolRegistry
 from ..tools.runtime_tools import RuntimeTools
 from .config import HarnessConfig
-from .hooks import AuditLog, HookRegistry, audit_log_hook, business_review_hook, write_confirmation_hook
-from .stop_check import default_stop_hook
+from .hooks import AuditLog, HookRegistry, audit_log_hook, write_confirmation_hook
+from .tool_result_store import ToolResultStore
 from .trace import TraceRecorder
 
-
-GetMessages = Callable[[], list[dict] | None]
-SetMessages = Callable[[list[dict] | None], None]
 DispatchWorkers = Callable[[list[str], str], list[dict]]
 
 
@@ -44,37 +41,35 @@ class HarnessComponents:
     tools: ToolRegistry
     cache: dict[str, ToolResult]
     trace: TraceRecorder
+    result_store: ToolResultStore
     tool_pipeline: ToolExecutionPipeline
-    runtime_tools: RuntimeTools
 
 
 def build_harness_components(
     ontology: Ontology,
     repository: OntologyRepository,
-    registry: FunctionRegistry,
+    bindings: RuntimeBindings,
     llm_client: OpenAI,
     model: str,
     config: HarnessConfig,
     *,
-    set_current_messages: SetMessages,
-    get_current_messages: GetMessages,
-    dispatch_workers: DispatchWorkers,
+    dispatch_workers: DispatchWorkers | None = None,
 ) -> HarnessComponents:
     hooks = HookRegistry()
     audit = AuditLog()
-    rule_engine = RuleEngine(ontology, repository, registry) if ontology.rules else None
+    rule_engine = RuleEngine(ontology, repository) if ontology.rules else None
     context_mgr = ContextManager(llm_client, model)
     ont = OntologyRuntime(
         ontology,
-        registry,
+        bindings,
         repository=repository,
         rule_engine=rule_engine,
-        config=config,
     )
-    data = DataExecutor(repository, registry)
+    data = DataExecutor(repository, bindings)
     tools = ToolRegistry()
     cache: dict[str, ToolResult] = {}
     trace = TraceRecorder(jsonl_path=config.trace_jsonl_path)
+    result_store = ToolResultStore()
     # 工具 handler 尽量保持简单；统一的策略、校验、缓存、审计都在 pipeline 中完成。
     tool_pipeline = ToolExecutionPipeline(
         tools=tools,
@@ -83,16 +78,20 @@ def build_harness_components(
         audit=audit,
         cache=cache,
         trace=trace,
-        set_current_messages=set_current_messages,
+        result_store=result_store,
+        persist_large_results=config.enable_tool_result_reader,
     )
     runtime_tools = RuntimeTools(
-        context_mgr=context_mgr,
-        get_current_messages=get_current_messages,
-        dispatch_workers=dispatch_workers,
+        dispatch_workers=dispatch_workers if config.enable_worker_dispatch else None,
+        result_store=result_store if config.enable_tool_result_reader else None,
     )
 
     ont.register_tools(tools, data)
     runtime_tools.register(tools)
+    ont.set_available_tools({
+        item["function"]["name"]
+        for item in tools.build_tools()
+    })
     register_default_hooks(hooks, config)
 
     return HarnessComponents(
@@ -106,8 +105,8 @@ def build_harness_components(
         tools=tools,
         cache=cache,
         trace=trace,
+        result_store=result_store,
         tool_pipeline=tool_pipeline,
-        runtime_tools=runtime_tools,
     )
 
 
@@ -116,5 +115,3 @@ def register_default_hooks(hooks: HookRegistry, config: HarnessConfig):
         hooks.register("pre_tool_call", write_confirmation_hook)
     if config.enable_audit:
         hooks.register("post_tool_call", audit_log_hook)
-    hooks.register("post_tool_call", business_review_hook)
-    hooks.register("query_complete", default_stop_hook)

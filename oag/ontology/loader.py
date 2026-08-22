@@ -1,107 +1,64 @@
-"""Load declarative or provider-based domains."""
+"""Build one OAG domain through the provider lifecycle."""
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
-
-import yaml
-
-from .adapters.sqlite_graph import SqlitePropertyGraphSource
-from .domain import DomainContext
-from .registry import FunctionRegistry
+from .bindings import RuntimeBindings
+from .domain import DomainContext, DomainProvider
 from .repository import OntologyRepository
 from .schema import Ontology
+from .source import SourceManager
 
 
-def load_domain(domain_dir: str | Path) -> tuple[Ontology, OntologyRepository, FunctionRegistry]:
-    domain_dir = Path(domain_dir).resolve()
-    manifest_path = domain_dir / "domain.yaml"
-    manifest = _load_manifest(manifest_path) if manifest_path.is_file() else None
-    provider = _load_provider(domain_dir, manifest) if manifest else None
-    if provider is not None:
-        ontology = provider.load_ontology()
-        if not isinstance(ontology, Ontology):
-            raise TypeError("Domain provider load_ontology must return Ontology")
-    else:
-        ontology = Ontology.load(domain_dir / "ontology.yaml")
+def load_domain(
+    provider: DomainProvider,
+) -> tuple[Ontology, OntologyRepository, RuntimeBindings]:
+    ontology = provider.load_ontology()
+    if not isinstance(ontology, Ontology):
+        raise TypeError("Domain provider load_ontology must return Ontology")
 
-    registry = FunctionRegistry()
-    registry.register_source_adapter(
-        "sqlite_property_graph",
-        SqlitePropertyGraphSource.factory(domain_dir),
-    )
-
-    repository = OntologyRepository(ontology, registry)
-    if provider is not None:
+    bindings = RuntimeBindings()
+    sources = SourceManager(ontology)
+    repository = OntologyRepository(ontology, sources)
+    try:
         provider.register(DomainContext(
-            domain_dir=domain_dir,
             ontology=ontology,
-            registry=registry,
+            bindings=bindings,
+            sources=sources,
             repository=repository,
         ))
-    else:
-        func_pkg = _import_module(domain_dir, "functions")
-        func_pkg.register(registry, repository, ontology)
-
-    return ontology, repository, registry
-
-
-def _load_manifest(path: Path) -> dict:
-    with path.open(encoding="utf-8") as stream:
-        manifest = yaml.safe_load(stream)
-    if not isinstance(manifest, dict):
-        raise ValueError(f"{path} must contain a YAML mapping")
-    if manifest.get("schema") != "oag.domain.v1":
-        raise ValueError(f"{path} schema must be oag.domain.v1")
-    unknown = set(manifest) - {"schema", "provider"}
-    if unknown:
-        raise ValueError(
-            f"{path} contains unknown fields: {', '.join(sorted(unknown))}"
+        sources.validate_configuration()
+        declared_functions = set(ontology.functions)
+        registered_functions = {
+            name for name, _definition in bindings.list_functions()
+        }
+        extra_functions = sorted(registered_functions - declared_functions)
+        if extra_functions:
+            raise ValueError(
+                "Domain registered functions absent from the ontology: "
+                + ", ".join(extra_functions)
+            )
+        missing_functions = sorted(
+            declared_functions - registered_functions
         )
-    provider = manifest.get("provider")
-    if not isinstance(provider, str) or ":" not in provider:
-        raise ValueError(f"{path} provider must be module:factory")
-    return manifest
+        if missing_functions:
+            raise ValueError(
+                "Domain function implementations are missing: "
+                + ", ".join(missing_functions)
+            )
+        mismatched_functions = sorted(
+            name
+            for name, definition in ontology.functions.items()
+            if bindings.get_def(name) != definition
+        )
+        if mismatched_functions:
+            raise ValueError(
+                "Domain function definitions do not match the ontology: "
+                + ", ".join(mismatched_functions)
+            )
+        if ontology.actions and bindings.get_action_runtime() is None:
+            raise ValueError("Domain actions require an ActionRuntime")
+    except Exception:
+        repository.close()
+        raise
 
-
-def _load_provider(domain_dir: Path, manifest: dict):
-    module_name, factory_name = manifest["provider"].split(":", 1)
-    module = _import_module(domain_dir, module_name)
-    factory = getattr(module, factory_name, None)
-    if not callable(factory):
-        raise ValueError(f"Domain provider factory not found: {manifest['provider']}")
-    provider = factory(domain_dir)
-    if not callable(getattr(provider, "load_ontology", None)):
-        raise TypeError("Domain provider must define load_ontology")
-    if not callable(getattr(provider, "register", None)):
-        raise TypeError("Domain provider must define register")
-    return provider
-
-
-def _import_module(domain_dir: Path, module_name: str):
-    relative = Path(*module_name.split("."))
-    module_path = domain_dir / relative
-    if module_path.is_dir():
-        source_path = module_path / "__init__.py"
-        search_locations = [str(module_path)]
-    else:
-        source_path = module_path.with_suffix(".py")
-        search_locations = None
-    if not source_path.is_file():
-        raise FileNotFoundError(f"Domain module not found: {module_name}")
-
-    pkg_name = f"_domain_{domain_dir.name}_{module_name.replace('.', '_')}"
-
-    spec = importlib.util.spec_from_file_location(
-        pkg_name,
-        source_path,
-        submodule_search_locations=search_locations,
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import domain module: {module_name}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[pkg_name] = module
-    spec.loader.exec_module(module)
-    return module
+    return ontology, repository, bindings

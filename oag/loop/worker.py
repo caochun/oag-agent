@@ -10,51 +10,13 @@ import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from openai import OpenAI
 
 from ..llm.retry import call_llm_with_retry
 from ..runtime import ToolUseContext
-
-if TYPE_CHECKING:
-    from ..harness import Harness
-
-TOOL_ALLOWLIST: dict[str, set[str]] = {
-    "inspect": {"inspect_facility", "inspect", "query", "lookup_damage_grade", "apply_rule"},
-    "recon": {"plan_recon_mission", "check_compliance", "request_flight_approval",
-              "dispatch_drone", "collect_recon_data", "get_drone", "get_drones_in_range",
-              "get_operators_available", "inspect", "query", "lookup_drone_class",
-              "lookup_operator_license_rule", "lookup_airspace_rule"},
-    "plan": {"generate_clearance_plans", "score_plans", "lookup_clearance_technique",
-             "lookup_bridge_type", "inspect", "query"},
-    "dispatch": {"dispatch_resources", "get_depots_in_range", "get_rescue_teams_in_range",
-                 "get_equipment_by_depot", "get_material_by_depot", "inspect", "query"},
-    "report": {"generate_event_report", "query", "query_relations", "inspect"},
-}
-
-TASK_KEYWORDS: list[tuple[str, str]] = [
-    ("检查", "inspect"), ("评估", "inspect"), ("inspect", "inspect"),
-    ("侦测", "recon"), ("无人机", "recon"), ("飞行", "recon"),
-    ("方案", "plan"), ("抢通", "plan"),
-    ("调度", "dispatch"), ("资源", "dispatch"),
-    ("报告", "report"), ("报送", "report"),
-]
-
-
-def _classify_task(task: str) -> str:
-    for keyword, category in TASK_KEYWORDS:
-        if keyword in task:
-            return category
-    return ""
-
-
-def _filter_tools(all_tools: list[dict], task: str) -> list[dict]:
-    category = _classify_task(task)
-    allowed = TOOL_ALLOWLIST.get(category)
-    if not allowed:
-        return all_tools
-    return [t for t in all_tools if t["function"]["name"] in allowed]
+from ..tools.pipeline import ToolResult
 
 
 class Worker:
@@ -72,8 +34,7 @@ class Worker:
     def run(self, task: str) -> dict:
         system = self.harness.build_worker_system_prompt(self.worker_id, self.context)
 
-        all_tools = self.harness.build_tools()
-        tools = _filter_tools(all_tools, task)
+        tools = self.harness.build_worker_tools()
 
         messages: list[dict] = [
             {"role": "system", "content": system},
@@ -82,7 +43,7 @@ class Worker:
 
         tool_calls_log: list[dict] = []
 
-        for _ in range(self.max_turns):
+        for turn_count in range(1, self.max_turns + 1):
             request_kwargs = {
                 "model": self.model,
                 "messages": messages,
@@ -124,13 +85,14 @@ class Worker:
                         args,
                         context=ToolUseContext(
                             source="worker",
+                            turn_count=turn_count,
                             confirmed=False,
                             cache_namespace=self.cache_namespace,
                         ),
                     )
                 except (json.JSONDecodeError, ValueError) as exc:
                     args = {}
-                    result = SimpleToolResult(
+                    result = ToolResult(
                         json.dumps({"error": f"工具参数无效: {exc}"}, ensure_ascii=False)
                     )
                 messages.append({
@@ -147,12 +109,6 @@ class Worker:
             "tool_calls": tool_calls_log,
             "status": "max_turns",
         }
-
-
-class SimpleToolResult:
-    def __init__(self, content: str):
-        self.content = content
-
 
 def run_workers_parallel(harness: Any, llm_client: OpenAI, model: str,
                          tasks: list[str], context: str = "",

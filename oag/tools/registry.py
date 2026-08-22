@@ -7,17 +7,18 @@ ToolDef 同时描述模型可见的函数 schema 和 harness 策略；ToolRegist
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
 
 @dataclass
 class ToolPolicy:
     read_only: bool = True
     requires_confirmation: bool = False
+    # User input is a conversational pause, not authorization to execute a
+    # side-effecting tool.  It has a separate protocol from confirmation.
+    requires_user_input: bool = False
     concurrency_safe: bool = True
     worker_allowed: bool = True
-    idempotent: bool = True
-    destructive: bool = False
     timeout_seconds: float | None = 30.0
 
 
@@ -29,24 +30,8 @@ class ToolDef:
     handler: Callable[[dict], str]
     usage_prompt: str = ""
     category: str = "query"
-    is_read_only: bool = True
-    requires_confirmation: bool = False
     max_result_chars: int = 5000
-    policy: ToolPolicy | None = None
-
-    def __post_init__(self):
-        if self.policy is None:
-            self.policy = ToolPolicy(
-                read_only=self.is_read_only,
-                requires_confirmation=self.requires_confirmation,
-                concurrency_safe=self.is_read_only,
-                worker_allowed=self.is_read_only,
-                idempotent=self.is_read_only,
-                destructive=not self.is_read_only,
-            )
-        else:
-            self.is_read_only = self.policy.read_only
-            self.requires_confirmation = self.policy.requires_confirmation
+    policy: ToolPolicy = field(default_factory=ToolPolicy)
 
 
 class ToolRegistry:
@@ -58,6 +43,8 @@ class ToolRegistry:
         self._built_tools_version = -1
 
     def register(self, tool: ToolDef):
+        if tool.name in self._tools:
+            raise ValueError(f"Tool already registered: {tool.name}")
         self._tools[tool.name] = tool
         self._version += 1
         self._built_tools_cache = None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+
 @dataclass
 class RunState:
     messages: list[dict]
@@ -11,8 +12,7 @@ class RunState:
     user_question: str = ""
     allowed_tools: frozenset[str] | None = None
     turn_count: int = 0
-    stop_hook_active: bool = False
-    transition_reason: str | None = None
+    query_complete_retry_active: bool = False
     cache_namespace: str = ""
 
 
@@ -24,10 +24,11 @@ class PendingConfirmation:
     tool_call_id: str
     messages: list[dict]
     skipped_tool_calls: list[dict] | None = None
+    expects_answer: bool = False
     user_question: str = ""
     allowed_tools: frozenset[str] | None = None
     turn_count: int = 0
-    stop_hook_active: bool = False
+    query_complete_retry_active: bool = False
     cache_namespace: str = ""
 
 
@@ -35,10 +36,9 @@ class PendingConfirmation:
 class ToolUseContext:
     session_id: str = ""
     messages: list[dict] | None = None
+    turn_count: int | None = None
     confirmed: bool = False
     source: str = "main"
-    agent_id: str | None = None
-    allow_user_prompt: bool = True
     cancelled: bool = False
     storage_dir: str | None = None
     cache_namespace: str = ""

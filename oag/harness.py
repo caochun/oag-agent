@@ -12,38 +12,34 @@ from datetime import datetime
 from openai import OpenAI
 
 from .llm.context_usage import collect_context_usage
+from .loop.worker import run_workers_parallel
+from .ontology.bindings import RuntimeBindings
+from .ontology.repository import OntologyRepository
+from .ontology.schema import Ontology
 from .runtime import HarnessConfig, ToolUseContext
 from .runtime.components import build_harness_components
 from .tools.pipeline import ToolResult
-from .loop.worker import run_workers_parallel
-from .ontology.registry import FunctionRegistry
-from .ontology.repository import OntologyRepository
-from .ontology.schema import Ontology
 
 logger = logging.getLogger(__name__)
 
 
 class Harness:
     def __init__(self, ontology: Ontology, repository: OntologyRepository,
-                 registry: FunctionRegistry, llm_client: OpenAI,
+                 bindings: RuntimeBindings, llm_client: OpenAI,
                  model: str, config: HarnessConfig | None = None):
         self.ontology = ontology
         self.config = config or HarnessConfig()
-        self._current_messages: list[dict] | None = None
         components = build_harness_components(
             ontology,
             repository,
-            registry,
+            bindings,
             llm_client,
             model,
             self.config,
-            set_current_messages=self._set_current_messages,
-            get_current_messages=self._get_current_messages,
             dispatch_workers=self._dispatch_workers,
         )
         self.hooks = components.hooks
         self.audit = components.audit
-        self.rule_engine = components.rule_engine
         self.repository = components.repository
         self.context_mgr = components.context_mgr
         self.ont = components.ont
@@ -52,12 +48,11 @@ class Harness:
         self._cache = components.cache
         self.trace = components.trace
         self.tool_pipeline = components.tool_pipeline
-        self.runtime_tools = components.runtime_tools
         self._static_prompt_cache: dict[str, list[str]] = {}
         self._tools_cache_version = -1
         self._tools_cache: list[dict] | None = None
 
-    def register_stop_hook(self, handler):
+    def register_query_complete_hook(self, handler):
         self.hooks.register("query_complete", handler)
 
     def execute_tool(self, tool_name: str, args: dict,
@@ -81,12 +76,6 @@ class Harness:
             messages=messages,
             confirmed=confirmed,
         )
-
-    def _set_current_messages(self, messages: list[dict] | None):
-        self._current_messages = messages
-
-    def _get_current_messages(self) -> list[dict] | None:
-        return self._current_messages
 
     def _dispatch_workers(self, tasks: list[str], context: str) -> list[dict]:
         return run_workers_parallel(
@@ -116,6 +105,17 @@ class Harness:
         self._tools_cache_version = self.tools.version
         return self._tools_cache
 
+    def build_worker_tools(self) -> list[dict]:
+        """Return visible tools whose declared policy permits worker use."""
+        return [
+            tool
+            for tool in self.build_tools()
+            if (
+                (definition := self.tools.get(tool.get("function", {}).get("name", "")))
+                and definition.policy.worker_allowed
+            )
+        ]
+
     def collect_context_usage(self, messages: list[dict],
                               tools: list[dict] | None = None) -> dict:
         return collect_context_usage(
@@ -135,11 +135,6 @@ class Harness:
         runtime_context = self.build_runtime_context()
         if runtime_context:
             sections.append(runtime_context)
-
-        if self.config.include_ontology_full_context:
-            full_context = self.ont.build_full_context()
-            if full_context:
-                sections.append(full_context)
 
         if self.config.append_system_prompt.strip():
             sections.append(self.config.append_system_prompt.strip())
@@ -162,7 +157,7 @@ class Harness:
 
     def build_runtime_context(self) -> str:
         ontology_details = (
-            "完整函数、对象、规则定义请调用 inspect 获取"
+            "摘要不足以回答属性、约束或能力细节时再调用 inspect"
             if "inspect" not in set(self.ontology.excluded_tools or [])
             else "当前领域仅暴露可用工具摘要"
         )
@@ -185,21 +180,18 @@ class Harness:
         sections = [
             f"你是 Worker {worker_id}，负责执行一个具体子任务。",
             self.ont.build_base_system_prompt(),
-            self.ont.build_ontology_summary(),
+            self.ont.build_ontology_summary(include_actions=False),
             "## 背景信息（主 Agent 已获取）\n" + (context or "(无)"),
         ]
         requirements = [
             "直接执行任务，不要重复查询主 Agent 已提供的信息",
             "完成后用 1-3 句话总结关键结果",
-            "包含具体数据（等级、数值、状态）",
+            "包含支持结论的具体事实",
         ]
         if "inspect" not in set(self.ontology.excluded_tools or []):
             requirements.insert(1, "需要完整定义时调用 inspect，不要依赖主 Agent 的完整历史")
         sections.append("## 要求\n" + "\n".join(f"- {item}" for item in requirements))
         return "\n\n".join(section for section in sections if section.strip())
-
-    def build_ontology_full_context(self) -> str:
-        return self.ont.build_full_context()
 
     def maybe_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
         return self.context_mgr.maybe_compact(messages)
@@ -207,7 +199,11 @@ class Harness:
     def force_compact(self, messages: list[dict]) -> tuple[list[dict], bool]:
         return self.context_mgr.force_compact(messages)
 
-    def run_stop_check(self, user_question: str, messages: list[dict]) -> str | None:
+    def run_query_complete_hooks(
+        self,
+        user_question: str,
+        messages: list[dict],
+    ) -> str | None:
         result = self.hooks.fire("query_complete", {
             "messages": messages,
             "user_question": user_question,

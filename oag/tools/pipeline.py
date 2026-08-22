@@ -1,6 +1,6 @@
 """工具执行管线。
 
-这是每次工具调用的中心策略闸门：worker 权限、mutate 校验、hooks/确认、
+这是每次工具调用的中心策略闸门：worker 权限、hooks/确认、
 只读缓存、本体约束、结果截断、审计 hook 和 trace 都在这里统一处理。
 """
 
@@ -10,11 +10,11 @@ import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextvars import copy_context
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Protocol
 
 from ..runtime import ToolUseContext, TraceRecorder
 from ..runtime.hooks import AuditLog, HookRegistry, HookResult
-from ..runtime.tool_result_store import persist_large_tool_result
+from ..runtime.tool_result_store import ToolResultStore
 from .registry import ToolDef, ToolRegistry
 
 
@@ -26,12 +26,11 @@ class ToolResult:
     blocked: bool = False
     block_reason: str = ""
     needs_confirmation: bool = False
+    needs_user_input: bool = False
 
 
 class ToolPolicyRuntime(Protocol):
-    def validate_mutate(self, args: dict) -> str | None: ...
     def check_constraints(self, tool_name: str, args: dict) -> str | None: ...
-    def requires_confirmation(self, tool_name: str, args: dict) -> bool: ...
 
 
 class ToolExecutionPipeline:
@@ -42,31 +41,40 @@ class ToolExecutionPipeline:
                  audit: AuditLog,
                  cache: dict[str, ToolResult],
                  trace: TraceRecorder,
-                 set_current_messages: Callable[[list[dict] | None], None]):
+                 result_store: ToolResultStore | None = None,
+                 persist_large_results: bool = True):
         self.tools = tools
         self.ont = ontology_runtime
         self.hooks = hooks
         self.audit = audit
         self.cache = cache
         self.trace = trace
-        self.set_current_messages = set_current_messages
+        self.result_store = result_store or ToolResultStore()
+        self.persist_large_results = persist_large_results
 
     def execute(self, tool_name: str, args: dict, context: ToolUseContext) -> ToolResult:
         tool = self.tools.get(tool_name)
         if not tool:
+            reason = f"未知工具: {tool_name}"
             self.trace.record(
                 "tool_unknown",
                 session_id=context.session_id,
                 source=context.source,
+                turn_count=context.turn_count,
                 tool_name=tool_name,
             )
-            return ToolResult(content=json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps({"error": reason}, ensure_ascii=False),
+                blocked=True,
+                block_reason=reason,
+            )
 
         # 执行顺序很重要：先做便宜的策略/校验，再触发 hooks，最后才执行 handler。
         self.trace.record(
             "tool_start",
             session_id=context.session_id,
             source=context.source,
+            turn_count=context.turn_count,
             tool_name=tool_name,
             args=args,
             confirmed=context.confirmed,
@@ -80,17 +88,13 @@ class ToolExecutionPipeline:
             self._record_tool_result("tool_blocked", tool_name, context, result)
             return result
 
-        if result := self._validate_mutation(tool_name, args, context):
-            self._record_tool_result("tool_blocked", tool_name, context, result)
+        if result := self._maybe_pause_for_user_question(tool_name, args, tool, context):
+            self._record_tool_result("tool_user_input_required", tool_name, context, result)
             return result
 
         if result := self._run_pre_tool_hooks(tool_name, args, tool, context):
             event_type = "tool_confirmation_required" if result.needs_confirmation else "tool_blocked"
             self._record_tool_result(event_type, tool_name, context, result)
-            return result
-
-        if result := self._maybe_pause_for_user_question(tool_name, args, tool, context):
-            self._record_tool_result("tool_confirmation_required", tool_name, context, result)
             return result
 
         if result := self._get_cached_result(tool_name, args, tool, context):
@@ -110,9 +114,6 @@ class ToolExecutionPipeline:
 
         result = self._execute_handler(tool_name, args, tool, context)
         self._store_cache_result(tool_name, args, tool, result, context)
-
-        if tool_name == "mutate" and not result.blocked:
-            self.cache.clear()
 
         self._record_tool_result("tool_end", tool_name, context, result)
         return result
@@ -140,22 +141,9 @@ class ToolExecutionPipeline:
             )
         return None
 
-    def _validate_mutation(self, tool_name: str, args: dict,
-                           context: ToolUseContext) -> ToolResult | None:
-        if tool_name != "mutate":
-            return None
-
-        pre_check = self.ont.validate_mutate(args)
-        if not pre_check:
-            return None
-        return ToolResult(content=pre_check, blocked=True, block_reason=pre_check)
-
     def _run_pre_tool_hooks(self, tool_name: str, args: dict, tool: ToolDef,
                             context: ToolUseContext) -> ToolResult | None:
         if context.confirmed:
-            return None
-
-        if tool.requires_confirmation and not self.ont.requires_confirmation(tool_name, args):
             return None
 
         pre_result = self.hooks.fire("pre_tool_call", {
@@ -181,21 +169,23 @@ class ToolExecutionPipeline:
 
     def _maybe_pause_for_user_question(self, tool_name: str, args: dict,
                                        tool: ToolDef, context: ToolUseContext) -> ToolResult | None:
-        if not (tool.requires_confirmation and not context.confirmed and tool_name == "ask_user"):
+        if not (
+            tool.policy.requires_user_input
+            and not context.confirmed
+        ):
             return None
 
-        # ask_user 被建模成“需要确认的工具暂停”，这样 UI 能统一渲染问题并回填答案。
         raw_result = tool.handler(args)
         return ToolResult(
             content=raw_result,
             blocked=True,
             block_reason=args.get("question", ""),
-            needs_confirmation=True,
+            needs_user_input=True,
         )
 
     def _get_cached_result(self, tool_name: str, args: dict, tool: ToolDef,
                            context: ToolUseContext) -> ToolResult | None:
-        if not tool.is_read_only:
+        if not tool.policy.read_only:
             return None
         return self.cache.get(self._cache_key(tool_name, args, context))
 
@@ -212,9 +202,6 @@ class ToolExecutionPipeline:
 
     def _execute_handler(self, tool_name: str, args: dict, tool: ToolDef,
                          context: ToolUseContext) -> ToolResult:
-        if tool_name == "summarize_progress":
-            self.set_current_messages(context.messages)
-
         if context.cancelled:
             reason = f"工具 {tool_name} 已取消"
             return ToolResult(
@@ -235,10 +222,7 @@ class ToolExecutionPipeline:
             context,
         )
 
-        post_result = self._run_post_tool_hooks(tool_name, args, tool, raw_result, context)
-        review_notes = post_result.data.get("review_notes", [])
-        if review_notes:
-            visible_result += "\n\n[⚠ 系统校验提示]\n" + "\n".join(f"- {n}" for n in review_notes)
+        self._run_post_tool_hooks(tool_name, args, tool, raw_result, context)
 
         return ToolResult(
             content=visible_result,
@@ -250,7 +234,10 @@ class ToolExecutionPipeline:
                                   tool: ToolDef) -> ToolResult:
         timeout = tool.policy.timeout_seconds if tool.policy else None
         if timeout is None or timeout <= 0:
-            raw_result = tool.handler(args)
+            try:
+                raw_result = tool.handler(args)
+            except Exception as exc:
+                return self._handler_error(tool_name, exc)
             return ToolResult(content=raw_result, raw_content=raw_result)
 
         pool = ThreadPoolExecutor(max_workers=1)
@@ -267,8 +254,22 @@ class ToolExecutionPipeline:
                 blocked=True,
                 block_reason=reason,
             )
+        except Exception as exc:
+            return self._handler_error(tool_name, exc)
         finally:
             pool.shutdown(wait=False, cancel_futures=True)
+
+    @staticmethod
+    def _handler_error(tool_name: str, exc: Exception) -> ToolResult:
+        reason = f"工具执行失败: {tool_name}"
+        return ToolResult(
+            content=json.dumps({
+                "error": reason,
+                "details": str(exc),
+            }, ensure_ascii=False),
+            blocked=True,
+            block_reason=reason,
+        )
 
     def _prepare_visible_result(self, tool_name: str, raw_result: str,
                                 tool: ToolDef,
@@ -277,17 +278,26 @@ class ToolExecutionPipeline:
         if len(raw_result) <= max_chars:
             return raw_result, False
 
-        return persist_large_tool_result(
-            storage_dir=context.storage_dir,
+        if not self.persist_large_results:
+            return json.dumps({
+                "truncated": True,
+                "original_chars": len(raw_result),
+                "preview_chars": max_chars,
+                "preview": raw_result[:max_chars],
+                "hint": "结果过长，当前仅返回预览；请缩小查询范围。",
+            }, ensure_ascii=False), True
+
+        return self.result_store.persist(
             session_id=context.session_id,
             tool_name=tool_name,
             content=raw_result,
             preview_chars=max_chars,
+            storage_dir=context.storage_dir,
         ), True
 
     def _store_cache_result(self, tool_name: str, args: dict, tool: ToolDef,
                             result: ToolResult, context: ToolUseContext):
-        if tool.is_read_only:
+        if tool.policy.read_only and not result.blocked:
             self.cache[self._cache_key(tool_name, args, context)] = result
 
     def _run_post_tool_hooks(self, tool_name: str, args: dict, tool: ToolDef,
@@ -308,9 +318,11 @@ class ToolExecutionPipeline:
             event_type,
             session_id=context.session_id,
             source=context.source,
+            turn_count=context.turn_count,
             tool_name=tool_name,
             blocked=result.blocked,
             needs_confirmation=result.needs_confirmation,
+            needs_user_input=result.needs_user_input,
             truncated=result.truncated,
             block_reason=result.block_reason,
             content_preview=result.content[:300],
@@ -318,10 +330,8 @@ class ToolExecutionPipeline:
 
     def _cache_key(self, tool_name: str, args: dict,
                    context: ToolUseContext) -> str:
-        # Read results may depend on live domain state (for example the active
-        # flood workspace and its ``latest`` forecast).  Cache only inside one
-        # agent run; falling back to the session keeps direct Harness callers
-        # isolated without coupling the generic runtime to a domain concept.
+        # Read results may depend on live domain state. Cache only inside one
+        # agent run; the session fallback isolates direct Harness callers.
         namespace = context.cache_namespace or context.session_id
         return json.dumps(
             [namespace, tool_name, args],

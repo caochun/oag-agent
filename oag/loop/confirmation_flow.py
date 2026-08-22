@@ -50,11 +50,11 @@ class ConfirmationFlow:
             yield TextEvent(content=f"已取消 {pending.tool_name} 的执行。")
             return
 
-        if pending.tool_name == "ask_user" and answer:
+        if pending.expects_answer:
             messages.append({
                 "role": "tool",
                 "tool_call_id": pending.tool_call_id,
-                "content": json.dumps({"answer": answer}, ensure_ascii=False),
+                "content": json.dumps({"answer": answer or ""}, ensure_ascii=False),
             })
             self._append_skipped_tool_results(messages, pending)
             yield from self._continue(pending.session_id, messages, pending)
@@ -63,6 +63,7 @@ class ConfirmationFlow:
         context = ToolUseContext(
             session_id=pending.session_id,
             messages=messages,
+            turn_count=pending.turn_count,
             confirmed=True,
             cache_namespace=pending.cache_namespace,
         )
@@ -105,7 +106,9 @@ class ConfirmationFlow:
             user_question=pending.user_question if pending else "",
             allowed_tools=pending.allowed_tools if pending else None,
             turn_count=pending.turn_count if pending else 0,
-            stop_hook_active=pending.stop_hook_active if pending else False,
+            query_complete_retry_active=(
+                pending.query_complete_retry_active if pending else False
+            ),
         )
         yield from self.run_loop(state)
         self.save_messages(session_id, messages)

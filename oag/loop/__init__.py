@@ -6,8 +6,11 @@ loop 包包含在线编排路径：主查询循环、工具调用排序和并发
 
 __all__ = [
     "ConfirmationFlow",
+    "LlmResponseParser",
     "QueryLoop",
+    "ToolCallCoordinator",
     "ToolExecutor",
+    "ToolExecutionPaused",
     "Worker",
     "run_workers_parallel",
 ]
@@ -22,6 +25,18 @@ def __getattr__(name: str):
         from .query_loop import QueryLoop
 
         return QueryLoop
+    if name == "LlmResponseParser":
+        from .response_parser import LlmResponseParser
+
+        return LlmResponseParser
+    if name == "ToolCallCoordinator":
+        from .tool_call_coordinator import ToolCallCoordinator
+
+        return ToolCallCoordinator
+    if name == "ToolExecutionPaused":
+        from .tool_call_coordinator import ToolExecutionPaused
+
+        return ToolExecutionPaused
     if name == "ToolExecutor":
         from .tool_executor import ToolExecutor
 

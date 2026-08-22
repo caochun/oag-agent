@@ -1,24 +1,21 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import time
 from contextvars import ContextVar
-from pathlib import Path
 from types import SimpleNamespace
 
-from oag.harness import Harness, HarnessConfig
+import pytest
+
 from oag.agent import Agent
+from oag.harness import Harness, HarnessConfig
+from oag.llm.context import ContextManager
+from oag.llm.context_usage import collect_context_usage
 from oag.loop.confirmation_flow import ConfirmationFlow
 from oag.loop.query_loop import QueryLoop
 from oag.loop.tool_executor import ToolExecutor
-from oag.llm.context import ContextManager
-from oag.llm.context_usage import collect_context_usage
-from oag.runtime.message_sanitizer import sanitize_messages
-from oag.runtime.tool_result_store import read_persisted_tool_result
-from oag.ontology.registry import FunctionRegistry
-from oag.runtime import PendingConfirmation, RunState, ToolUseContext
-from oag.runtime.hooks import HookResult
+from oag.ontology.bindings import RuntimeBindings
+from oag.ontology.repository import OntologyRepository
 from oag.ontology.schema import (
     ActionDef,
     ActionInputDef,
@@ -27,13 +24,17 @@ from oag.ontology.schema import (
     DataSourceDef,
     FunctionDef,
     FunctionParam,
-    Ontology,
     ObjectTypeDef,
+    Ontology,
     Precondition,
     PropertyDef,
 )
+from oag.ontology.source import SourceManager
+from oag.runtime import PendingConfirmation, RunState, ToolUseContext
+from oag.runtime.events import AssistantDeltaEvent, AssistantEndEvent
+from oag.runtime.hooks import HookResult
+from oag.runtime.message_sanitizer import sanitize_messages
 from oag.runtime.session_store import SessionStore
-from oag.ontology.repository import OntologyRepository
 from oag.tools.registry import ToolDef, ToolPolicy
 
 
@@ -66,7 +67,7 @@ class MemorySource:
         self.rows: dict[str, list[dict]] = {}
         self.location = None
 
-    def query_records(self, kind, object_type, binding, filters=None, limit=None,
+    def query_objects(self, object_type, binding, filters=None, limit=None,
                       order_by=None, offset=None):
         rows = list(self.rows.get(object_type, []))
         for key, value in (filters or {}).items():
@@ -85,17 +86,14 @@ class MemorySource:
             rows = rows[:limit]
         return [dict(row) for row in rows]
 
-    def count_records(self, kind, object_type, binding, filters=None):
-        return len(self.query_records(kind, object_type, binding, filters))
-
-    def query_record_by_id(self, kind, object_type, binding, id_value):
+    def get_object(self, object_type, binding, id_value):
         id_field = self.ontology.get_id_column(object_type)
         if not id_field:
             return None
-        rows = self.query_records(kind, object_type, binding, {id_field: id_value}, limit=1)
+        rows = self.query_objects(object_type, binding, {id_field: id_value}, limit=1)
         return rows[0] if rows else None
 
-    def search_records(self, kind, object_type, binding, keyword, limit=20):
+    def search_objects(self, object_type, binding, keyword, limit=20):
         obj_def = self.ontology.objects[object_type]
         text_cols = [name for name, prop in obj_def.properties.items() if prop.type == "str"]
         results = []
@@ -110,29 +108,11 @@ class MemorySource:
                 break
         return results
 
-    def create_record(self, kind, object_type, binding, data):
-        self.rows.setdefault(object_type, []).append(dict(data))
-        return {"inserted": 1}
-
-    def update_record(self, kind, object_type, binding, id_value, data):
-        id_field = self.ontology.get_id_column(object_type)
-        updated = 0
-        for row in self.rows.get(object_type, []):
-            if row.get(id_field) == id_value:
-                row.update(dict(data))
-                updated += 1
-                break
-        return {"updated": updated}
-
-    def retire_record(self, kind, object_type, binding, id_value):
-        id_field = self.ontology.get_id_column(object_type)
-        rows = self.rows.get(object_type, [])
-        before = len(rows)
-        self.rows[object_type] = [row for row in rows if row.get(id_field) != id_value]
-        return {"deleted": before - len(self.rows[object_type])}
-
     def query_relations(self, *args, **kwargs):
         return []
+
+    def get_relation(self, *args, **kwargs):
+        return None
 
     def load_data(self, object_type, rows):
         self.rows.setdefault(object_type, []).extend(dict(row) for row in rows)
@@ -141,21 +121,20 @@ class MemorySource:
         pass
 
 
-def make_repository(ontology: Ontology, registry: FunctionRegistry) -> OntologyRepository:
-    registry.register_source_adapter(
+def make_repository(ontology: Ontology) -> OntologyRepository:
+    sources = SourceManager(ontology)
+    sources.register(
         "memory",
         lambda ontology, **kw: MemorySource(ontology),
     )
-    return OntologyRepository(ontology, registry)
+    return OntologyRepository(ontology, sources)
 
 
 def make_harness(config: HarnessConfig | None = None,
-                 tool_preferences: dict | None = None,
                  include_actions: bool = False) -> Harness:
     ontology = Ontology(
         name="TestDomain",
         description="Test domain",
-        tool_preferences=tool_preferences or {},
         data_sources={"memory": DataSourceDef(type="memory", mode="writable")},
         objects={
             "Asset": ObjectTypeDef(
@@ -205,11 +184,15 @@ def make_harness(config: HarnessConfig | None = None,
                 summary="Create a work order",
                 description="Create work order details",
                 usage_prompt="创建前必须确认 asset_id 指向真实资产，并说明写入影响。",
-                hint="Only create when user explicitly asks.",
                 reads_objects=["Asset", "WorkOrder"],
                 params={"asset_id": FunctionParam(type="str", description="Asset id")},
                 preconditions=[
-                    Precondition(object="Asset", field="asset_id", operator="exists"),
+                    Precondition(
+                        object="Asset",
+                        field="asset_id",
+                        operator="exists",
+                        value_from_param="asset_id",
+                    ),
                 ],
             ),
             "create_audit_note": FunctionDef(
@@ -243,27 +226,29 @@ def make_harness(config: HarnessConfig | None = None,
             ),
         } if include_actions else {},
     )
-    registry = FunctionRegistry()
+    bindings = RuntimeBindings()
     if include_actions:
-        registry.register_action_runtime(FakeActionRuntime())
-    repository = make_repository(ontology, registry)
-    repository.create_object("Asset", {"asset_id": "A1", "status": "ok"})
-    registry.register(
+        bindings.register_action_runtime(FakeActionRuntime())
+    repository = make_repository(ontology)
+    repository.sources.get("memory").load_data(
+        "Asset", [{"asset_id": "A1", "status": "ok"}],
+    )
+    bindings.register(
         "lookup_asset",
         lambda asset_id: {"asset_id": asset_id, "status": "ok"},
         ontology.functions["lookup_asset"],
     )
-    registry.register(
+    bindings.register(
         "create_work_order",
         lambda asset_id: {"order_id": "WO1", "asset_id": asset_id, "status": "created"},
         ontology.functions["create_work_order"],
     )
-    registry.register(
+    bindings.register(
         "create_audit_note",
         lambda asset_id: {"note_id": "N1", "asset_id": asset_id, "status": "created"},
         ontology.functions["create_audit_note"],
     )
-    registry.register(
+    bindings.register(
         "set_asset_threshold",
         lambda asset_id, threshold, enabled: {
             "asset_id": asset_id,
@@ -276,11 +261,27 @@ def make_harness(config: HarnessConfig | None = None,
     return Harness(
         ontology,
         repository,
-        registry,
+        bindings,
         DummyClient(),
         "dummy-model",
         config or HarnessConfig(enable_write_confirmation=False),
     )
+
+
+def register_confirmed_write_tool(harness: Harness, name: str = "write_record") -> str:
+    harness.tools.register(ToolDef(
+        name=name,
+        description="Test-only explicit write tool",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda args: json.dumps({"written": True}),
+        policy=ToolPolicy(
+            read_only=False,
+            requires_confirmation=True,
+            concurrency_safe=False,
+            worker_allowed=False,
+        ),
+    ))
+    return name
 
 
 def make_tool_call(name: str, tool_id: str = "tool_1") -> SimpleNamespace:
@@ -345,7 +346,14 @@ def test_prompt_uses_summary_context_and_inspect_for_details():
     assert "### 函数: lookup_asset" not in prompt
     assert "## 对象完整定义" not in prompt
     assert "首次调用函数时系统会自动注入" not in prompt
-    assert "完整函数、对象、规则定义请调用 inspect 获取" in prompt
+    assert "摘要不足以回答属性、约束或能力细节时再调用 inspect" in prompt
+    assert "ID、对象类型、属性名、关系类型和枚举/角色值必须按证据原样引用" in prompt
+    assert "多个对象与同一主体有关联，不代表这些对象彼此构成先后链路" in prompt
+    assert "不要按对象类型或 ID 命名拼接“典型链路”" in prompt
+    assert "对象 ID 只能作为 ID 使用" in prompt
+    assert "查询记录随附的 _semantics 是字段和类型语义的直接证据" in prompt
+    assert "用户未明确要求行业背景、判断或推测时，不要主动补充" in prompt
+    assert "不要为了复述已有摘要而调用" in prompt
 
     details = json.loads(harness.execute_tool("inspect", {"name": "create_work_order"}).content)
 
@@ -354,18 +362,61 @@ def test_prompt_uses_summary_context_and_inspect_for_details():
     assert details["reads_objects"] == ["Asset", "WorkOrder"]
 
 
-def test_analysis_tools_are_opt_in():
+def test_generic_analysis_and_crud_tools_are_not_registered():
     harness = make_harness()
 
-    assert harness.tools.has("describe")
+    assert not harness.tools.has("describe")
+    assert not harness.tools.has("count")
     assert not harness.tools.has("pivot")
     assert not harness.tools.has("distribution")
+    assert not harness.tools.has("mutate")
 
-    harness = make_harness(HarnessConfig(enable_analysis_tools=True))
 
-    assert harness.tools.has("describe")
-    assert harness.tools.has("pivot")
-    assert harness.tools.has("distribution")
+def test_get_object_uses_the_complete_stable_id():
+    harness = make_harness()
+
+    result = json.loads(harness.execute_tool(
+        "get_object",
+        {"object_type": "Asset", "id": "A1"},
+    ).content)
+
+    assert result["asset_id"] == "A1"
+    assert result["status"] == "ok"
+    assert result["_semantics"] == {
+        "kind": "object",
+        "type": "Asset",
+        "display_name": "Asset",
+        "description": "Asset full description",
+        "properties": {
+            "asset_id": {
+                "type": "str",
+                "display_name": "asset_id",
+                "description": "Asset id",
+            },
+            "status": {
+                "type": "str",
+                "display_name": "status",
+                "description": "Asset status",
+            },
+        },
+    }
+    schema = harness.tools.get("get_object").parameters
+    assert schema["required"] == ["object_type", "id"]
+    assert "完整稳定对象 ID" in schema["properties"]["id"]["description"]
+
+
+def test_query_requires_in_suffix_for_array_filters():
+    harness = make_harness()
+
+    result = harness.execute_tool(
+        "query",
+        {"object_type": "Asset", "filters": {"asset_id": ["A1", "A2"]}},
+    )
+
+    assert result.blocked
+    assert "asset_id__in" in result.content
+    description = harness.tools.get("query").parameters["properties"]["filters"]["description"]
+    assert "id__in" in description
 
 
 def test_function_tool_uses_ontology_execution_policy():
@@ -392,17 +443,21 @@ def test_action_catalog_registers_generic_discovery_and_form_tools():
     harness = make_harness(include_actions=True)
 
     assert harness.tools.has("get_available_actions")
-    form = harness.tools.get("ui_open_action_form")
+    form = harness.tools.get("request_action_input")
     assert form.parameters["properties"]["action_id"]["enum"] == ["create_work_order"]
     result = json.loads(form.handler({
         "action_id": "create_work_order",
         "context_id": "A1",
         "initial_inputs": {"asset_id": "A1"},
     }))
-    assert result["presentation"]["kind"] == "action_form"
-    assert result["presentation"]["initial_inputs"] == {"asset_id": "A1"}
+    assert result["interaction"]["kind"] == "action_form"
+    assert result["interaction"]["initial_inputs"] == {"asset_id": "A1"}
     assert form.policy.read_only is True
     assert form.policy.worker_allowed is False
+    visible_names = {
+        item["function"]["name"] for item in harness.build_tools()
+    }
+    assert "request_action_input" in visible_names
 
 
 def test_function_param_schema_rejects_string_for_float():
@@ -419,9 +474,10 @@ def test_function_param_schema_rejects_string_for_float():
 
 def test_function_tool_errors_are_structured_json():
     harness = make_harness()
-    harness.data.registry.register(
+    harness.data.bindings.register(
         "broken_lookup",
         lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")),
+        FunctionDef(summary="Broken lookup"),
     )
     harness.tools.register(ToolDef(
         name="broken_lookup",
@@ -432,14 +488,13 @@ def test_function_tool_errors_are_structured_json():
     ))
 
     result = harness.execute_tool("broken_lookup", {})
-    payload = json.loads(result.raw_content)
+    payload = json.loads(result.content)
 
     assert payload == {
-        "error": "函数执行错误",
-        "tool": "broken_lookup",
+        "error": "工具执行失败: broken_lookup",
         "details": "boom",
     }
-    assert "函数 broken_lookup 执行出错: 函数执行错误" in result.content
+    assert result.blocked
 
 
 def test_prompt_sections_are_layered_and_cached():
@@ -457,18 +512,6 @@ def test_prompt_sections_are_layered_and_cached():
     assert first == second
     assert list(harness._static_prompt_cache) == [""]
     assert all("## 运行时上下文" not in s for s in harness._static_prompt_cache[""])
-
-
-def test_prompt_can_include_full_context_for_compatibility():
-    harness = make_harness(HarnessConfig(
-        enable_write_confirmation=False,
-        include_ontology_full_context=True,
-    ))
-
-    prompt = harness.build_system_prompt()
-
-    assert "## 函数完整定义" in prompt
-    assert "### 函数: lookup_asset" in prompt
 
 
 def test_custom_append_and_runtime_context_layers():
@@ -506,6 +549,27 @@ def test_tool_schema_is_cached_and_invalidated_on_register():
     assert any(t["function"]["name"] == "new_tool" for t in third)
 
 
+def test_tool_registry_rejects_duplicate_names():
+    harness = make_harness()
+
+    with pytest.raises(ValueError, match="Tool already registered"):
+        harness.tools.register(ToolDef(
+            name="query",
+            description="Duplicate",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda args: "duplicate",
+        ))
+
+
+def test_runtime_bindings_reject_duplicate_function_names():
+    bindings = RuntimeBindings()
+    definition = FunctionDef(summary="Lookup")
+    bindings.register("lookup", lambda: "first", definition)
+
+    with pytest.raises(ValueError, match="Function already registered"):
+        bindings.register("lookup", lambda: "second", definition)
+
+
 def test_function_usage_prompt_is_added_to_tool_description():
     harness = make_harness()
 
@@ -518,7 +582,10 @@ def test_function_usage_prompt_is_added_to_tool_description():
 
 
 def test_runtime_tools_have_usage_prompts():
-    harness = make_harness()
+    harness = make_harness(HarnessConfig(
+        enable_worker_dispatch=True,
+        enable_tool_result_reader=True,
+    ))
 
     tools = harness.build_tools()
     dispatch_tool = next(t for t in tools if t["function"]["name"] == "dispatch_workers")
@@ -529,54 +596,47 @@ def test_runtime_tools_have_usage_prompts():
     assert "不要询问可以通过只读工具直接查到的信息" in ask_tool["function"]["description"]
 
 
-def test_generic_search_can_be_marked_fallback_only_per_ontology():
-    default_harness = make_harness()
-    fallback_harness = make_harness(tool_preferences={"generic_search": "fallback_only"})
+def test_default_prompt_does_not_advertise_disabled_runtime_extensions():
+    prompt = make_harness().build_system_prompt()
 
-    default_description = default_harness.tools.get("search").description
-    fallback_description = fallback_harness.tools.get("search").description
-
-    assert "兜底定位工具" not in default_description
-    assert "兜底定位工具" in fallback_description
-    assert "优先使用领域函数" in fallback_description
+    assert "dispatch_workers" not in prompt
+    assert "read_tool_result" not in prompt
 
 
-def test_agent_generated_append_only_create_does_not_need_confirmation():
+def test_worker_tool_visibility_uses_declared_policy_not_task_keywords():
+    harness = make_harness(include_actions=True)
+    register_confirmed_write_tool(harness)
+
+    names = {
+        tool["function"]["name"]
+        for tool in harness.build_worker_tools()
+    }
+
+    assert "lookup_asset" in names
+    assert "query" in names
+    assert "ask_user" not in names
+    assert "write_record" not in names
+    assert "get_available_actions" not in names
+
+
+def test_explicit_write_tool_needs_confirmation():
     harness = make_harness(HarnessConfig(enable_write_confirmation=True))
+    register_confirmed_write_tool(harness)
 
-    result = harness.execute_tool(
-        "mutate",
-        {"operation": "create", "object_type": "AuditNote", "data": {"note_id": "N2"}},
-    )
-
-    assert not result.blocked
-    assert not result.needs_confirmation
-    assert json.loads(result.content)["inserted"] == 1
-
-
-def test_agent_generated_mutable_mutate_still_needs_confirmation():
-    harness = make_harness(HarnessConfig(enable_write_confirmation=True))
-
-    result = harness.execute_tool(
-        "mutate",
-        {"operation": "create", "object_type": "WorkOrder", "data": {"order_id": "WO2"}},
-    )
+    result = harness.execute_tool("write_record", {})
 
     assert result.blocked
     assert result.needs_confirmation
 
 
-def test_mutate_validation_still_runs_after_confirmation():
+def test_explicit_write_tool_runs_after_confirmation():
     harness = make_harness(HarnessConfig(enable_write_confirmation=True))
+    register_confirmed_write_tool(harness)
 
-    result = harness.execute_tool(
-        "mutate",
-        {"operation": "update", "object_type": "AuditNote", "object_id": "N1", "data": {"status": "done"}},
-        confirmed=True,
-    )
+    result = harness.execute_tool("write_record", {}, confirmed=True)
 
-    assert result.blocked
-    assert "仅支持追加写入" in result.content
+    assert not result.blocked
+    assert json.loads(result.content) == {"written": True}
 
 
 def test_functions_are_always_read_only_and_do_not_need_confirmation():
@@ -612,21 +672,13 @@ def test_worker_system_prompt_uses_summary_not_full_context():
 
 def test_worker_context_blocks_confirmation_and_non_worker_tools():
     harness = make_harness()
+    register_confirmed_write_tool(harness)
     context = ToolUseContext(source="worker", confirmed=False)
 
-    mutate_result = harness.execute_tool(
-        "mutate",
-        {"operation": "create", "object_type": "WorkOrder", "data": {"order_id": "WO2"}},
-        context=context,
-    )
+    write_result = harness.execute_tool("write_record", {}, context=context)
     ask_user_result = harness.execute_tool(
         "ask_user",
         {"question": "Choose?", "options": [{"label": "A"}]},
-        context=context,
-    )
-    write_fn_result = harness.execute_tool(
-        "mutate",
-        {"operation": "create", "object_type": "WorkOrder", "data": {"order_id": "WO2"}},
         context=context,
     )
     read_fn_result = harness.execute_tool(
@@ -635,10 +687,23 @@ def test_worker_context_blocks_confirmation_and_non_worker_tools():
         context=context,
     )
 
-    assert mutate_result.blocked
+    assert write_result.blocked
     assert ask_user_result.blocked
-    assert write_fn_result.blocked
+    assert not ask_user_result.needs_confirmation
     assert not read_fn_result.blocked
+
+
+def test_ask_user_uses_user_input_protocol_not_write_confirmation():
+    harness = make_harness()
+
+    result = harness.execute_tool(
+        "ask_user",
+        {"question": "Choose?", "options": [{"label": "A"}]},
+    )
+
+    assert result.blocked
+    assert result.needs_user_input
+    assert not result.needs_confirmation
 
 
 def test_trace_records_successful_tool_execution():
@@ -736,6 +801,59 @@ def test_agent_sets_default_trace_jsonl_path(tmp_path):
     assert harness.trace.jsonl_path == str(tmp_path / "trace_TestDomain.jsonl")
 
 
+def test_agent_refreshes_persisted_system_prompt_for_new_user_turn(tmp_path):
+    harness = make_harness()
+    agent = Agent(harness, DummyClient(), "dummy-model", db_dir=str(tmp_path))
+    agent.sessions.save("s1", [
+        {"role": "system", "content": "stale prompt"},
+        {"role": "user", "content": "Previous question"},
+        {"role": "assistant", "content": "Previous answer"},
+    ])
+    agent._run_loop = lambda state: iter(())
+
+    list(agent.chat_stream("New question", session_id="s1"))
+
+    messages = agent.sessions.get("s1")
+    assert messages[0]["role"] == "system"
+    assert messages[0]["content"] == harness.build_system_prompt()
+    assert "stale prompt" not in messages[0]["content"]
+    assert messages[-1] == {"role": "user", "content": "New question"}
+
+
+def test_agent_chat_returns_only_final_assistant_turn(tmp_path):
+    harness = make_harness()
+    agent = Agent(harness, DummyClient(), "dummy-model", db_dir=str(tmp_path))
+    agent._run_loop = lambda state: iter([
+        AssistantDeltaEvent(content="I will check. "),
+        AssistantEndEvent(kind="progress"),
+        AssistantDeltaEvent(content="Asset A1 "),
+        AssistantDeltaEvent(content="is available."),
+        AssistantEndEvent(kind="final"),
+    ])
+
+    result = agent.chat("Explain A1", session_id="s1")
+
+    assert result == "Asset A1 is available."
+
+
+def test_agent_sse_preserves_assistant_delta_boundaries(tmp_path):
+    harness = make_harness()
+    agent = Agent(harness, DummyClient(), "dummy-model", db_dir=str(tmp_path))
+    agent._run_loop = lambda state: iter([
+        AssistantDeltaEvent(content="First "),
+        AssistantDeltaEvent(content="second"),
+        AssistantEndEvent(kind="final"),
+    ])
+
+    events = list(agent.chat_stream_sse("Question?", session_id="s1"))
+
+    assert events == [
+        {"type": "assistant_delta", "content": "First "},
+        {"type": "assistant_delta", "content": "second"},
+        {"type": "assistant_end", "kind": "final"},
+    ]
+
+
 def test_tool_pipeline_records_cache_hit_for_repeated_read_tool():
     harness = make_harness()
 
@@ -750,6 +868,19 @@ def test_tool_pipeline_records_cache_hit_for_repeated_read_tool():
         "tool_start",
         "tool_cache_hit",
     ]
+
+
+def test_tool_trace_preserves_originating_turn_count():
+    harness = make_harness()
+
+    harness.execute_tool(
+        "lookup_asset",
+        {"asset_id": "A1"},
+        context=ToolUseContext(session_id="s1", turn_count=4),
+    )
+
+    events = harness.trace.snapshot()
+    assert [event.turn_count for event in events] == [4, 4]
 
 
 def test_tool_cache_does_not_cross_agent_run_namespaces():
@@ -799,6 +930,60 @@ def test_timeout_worker_inherits_context_variables():
     assert result.content == "current-workspace"
 
 
+def test_tool_handler_exception_is_returned_as_blocked_result():
+    harness = make_harness()
+    harness.tools.register(ToolDef(
+        name="broken_handler",
+        description="Broken handler",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda args: (_ for _ in ()).throw(RuntimeError("boom")),
+        policy=ToolPolicy(timeout_seconds=None),
+    ))
+
+    result = harness.execute_tool("broken_handler", {})
+
+    assert result.blocked
+    assert json.loads(result.content) == {
+        "error": "工具执行失败: broken_handler",
+        "details": "boom",
+    }
+
+
+def test_blocked_read_tool_result_is_not_cached():
+    harness = make_harness()
+    attempts = 0
+
+    def flaky_handler(args):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary")
+        return "recovered"
+
+    harness.tools.register(ToolDef(
+        name="flaky_read",
+        description="Flaky read",
+        parameters={"type": "object", "properties": {}},
+        handler=flaky_handler,
+        policy=ToolPolicy(timeout_seconds=None),
+    ))
+    context = ToolUseContext(cache_namespace="flaky-run")
+
+    first = harness.execute_tool("flaky_read", {}, context=context)
+    second = harness.execute_tool("flaky_read", {}, context=context)
+
+    assert first.blocked
+    assert second.content == "recovered"
+    assert attempts == 2
+
+
+def test_unknown_tool_is_a_blocked_result():
+    result = make_harness().execute_tool("missing_tool", {})
+
+    assert result.blocked
+    assert result.block_reason == "未知工具: missing_tool"
+
+
 def test_tool_pipeline_runs_post_hook_for_cached_result():
     harness = make_harness()
     captured = []
@@ -815,6 +1000,37 @@ def test_tool_pipeline_runs_post_hook_for_cached_result():
 
     assert len(captured) == 2
     assert captured[0] == captured[1]
+
+
+def test_pre_tool_hook_can_block_a_read_only_tool():
+    harness = make_harness()
+    harness.hooks.register(
+        "pre_tool_call",
+        lambda context: HookResult(action="block", reason="policy denied"),
+    )
+
+    result = harness.execute_tool("lookup_asset", {"asset_id": "A1"})
+
+    assert result.blocked
+    assert result.block_reason == "policy denied"
+
+
+def test_action_form_prepare_error_is_a_blocked_tool_result():
+    harness = make_harness(include_actions=True)
+    harness.data.bindings.get_action_runtime().prepare_action = (
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("invalid context"))
+    )
+
+    result = harness.execute_tool(
+        "request_action_input",
+        {"action_id": "create_work_order", "context_id": "missing"},
+    )
+
+    assert result.blocked
+    assert json.loads(result.content) == {
+        "error": "工具执行失败: request_action_input",
+        "details": "invalid context",
+    }
 
 
 def test_tool_pipeline_validates_missing_required_arg():
@@ -864,7 +1080,7 @@ def test_tool_pipeline_times_out_slow_tool():
 
 
 def test_tool_pipeline_persists_large_tool_result(tmp_path):
-    harness = make_harness()
+    harness = make_harness(HarnessConfig(enable_tool_result_reader=True))
     harness.tools.register(ToolDef(
         name="large_tool",
         description="Large test tool",
@@ -889,7 +1105,7 @@ def test_tool_pipeline_persists_large_tool_result(tmp_path):
     assert "x" * 200 in (tmp_path / "tool-results" / "s1" / "large_tool.txt").read_text()
 
 
-def test_tool_pipeline_persists_large_tool_result_to_system_temp_by_default():
+def test_tool_pipeline_returns_preview_when_result_reader_is_disabled():
     harness = make_harness()
     harness.tools.register(ToolDef(
         name="large_temp_tool",
@@ -907,11 +1123,13 @@ def test_tool_pipeline_persists_large_tool_result_to_system_temp_by_default():
 
     payload = json.loads(result.content)
 
-    assert payload["path"].startswith(str(Path(tempfile.gettempdir()) / "oag-tool-results"))
+    assert payload["truncated"] is True
+    assert payload["preview"] == "y" * 20
+    assert "result_ref" not in payload
 
 
 def test_read_tool_result_reads_persisted_default_temp_result():
-    harness = make_harness()
+    harness = make_harness(HarnessConfig(enable_tool_result_reader=True))
     harness.tools.register(ToolDef(
         name="large_temp_tool",
         description="Large temp test tool",
@@ -929,11 +1147,11 @@ def test_read_tool_result_reads_persisted_default_temp_result():
 
     read_result = harness.execute_tool(
         "read_tool_result",
-        {"path": payload["path"], "max_chars": 1000},
+        {"result_ref": payload["result_ref"], "max_chars": 1000},
     )
     read_payload = json.loads(read_result.content)
 
-    assert read_payload["path"] == payload["path"]
+    assert read_payload["result_ref"] == payload["result_ref"]
     assert read_payload["chars"] == 1500
     assert read_payload["returned_chars"] == 1000
     assert read_payload["truncated"] is True
@@ -941,32 +1159,43 @@ def test_read_tool_result_reads_persisted_default_temp_result():
 
 
 def test_read_tool_result_defaults_to_limited_window_and_caps_max_chars():
-    payload_path = Path(tempfile.gettempdir()) / "oag-tool-results" / "read-default-window" / "large_tool.txt"
-    payload_path.parent.mkdir(parents=True, exist_ok=True)
-    payload_path.write_text("a" * 60000, encoding="utf-8")
+    harness = make_harness(HarnessConfig(enable_tool_result_reader=True))
+    harness.tools.register(ToolDef(
+        name="large_tool",
+        description="Large test tool",
+        parameters={"type": "object", "properties": {}},
+        handler=lambda args: "a" * 60000,
+        max_result_chars=20,
+    ))
+    persisted = json.loads(harness.execute_tool("large_tool", {}).content)
 
-    default_payload = json.loads(read_persisted_tool_result(path=str(payload_path)))
+    default_payload = json.loads(harness.execute_tool(
+        "read_tool_result", {"result_ref": persisted["result_ref"]},
+    ).content)
     assert default_payload["returned_chars"] == 12000
     assert default_payload["truncated"] is True
 
-    capped_payload = json.loads(read_persisted_tool_result(path=str(payload_path), max_chars=100000))
+    capped_payload = json.loads(harness.execute_tool(
+        "read_tool_result",
+        {"result_ref": persisted["result_ref"], "max_chars": 100000},
+    ).content)
     assert capped_payload["returned_chars"] == 50000
     assert capped_payload["truncated"] is True
 
 
 def test_read_tool_result_rejects_non_tool_result_path(tmp_path):
-    harness = make_harness()
+    harness = make_harness(HarnessConfig(enable_tool_result_reader=True))
     ordinary_file = tmp_path / "ordinary.txt"
     ordinary_file.write_text("secret", encoding="utf-8")
 
     result = harness.execute_tool(
         "read_tool_result",
-        {"path": str(ordinary_file)},
+        {"result_ref": "result:missing", "max_chars": 1000},
     )
     payload = json.loads(result.content)
 
     assert "error" in payload
-    assert "持久化工具结果目录" in payload["error"]
+    assert "工具结果引用" in payload["error"]
 
 
 def test_trace_records_worker_policy_block():
@@ -987,18 +1216,19 @@ def test_trace_records_worker_policy_block():
 
 def test_tool_executor_partitions_tool_calls_by_concurrency_policy():
     harness = make_harness()
+    register_confirmed_write_tool(harness)
     executor = ToolExecutor(harness)
 
     batches = executor.partition_tool_calls([
         (make_tool_call("query", "t1"), {"object_type": "Asset"}),
-        (make_tool_call("count", "t2"), {"object_type": "Asset"}),
-        (make_tool_call("mutate", "t3"), {"operation": "create", "object_type": "WorkOrder"}),
+        (make_tool_call("search", "t2"), {"keyword": "Asset"}),
+        (make_tool_call("write_record", "t3"), {}),
         (make_tool_call("lookup_asset", "t4"), {"asset_id": "A1"}),
     ])
 
     assert [[tc.function.name for tc, _ in batch] for batch in batches] == [
-        ["query", "count"],
-        ["mutate"],
+        ["query", "search"],
+        ["write_record"],
         ["lookup_asset"],
     ]
 
@@ -1043,18 +1273,34 @@ def test_tool_executor_runs_concurrency_safe_batch_in_parallel():
 
 def test_tool_executor_stops_before_later_calls_when_confirmation_needed():
     harness = make_harness(HarnessConfig(enable_write_confirmation=True))
+    register_confirmed_write_tool(harness)
     executor = ToolExecutor(harness)
     state = RunState(messages=[], session_id="s1", user_question="")
 
     results = executor.execute_tool_calls([
-        (make_tool_call("mutate", "t1"), {
-            "operation": "create", "object_type": "WorkOrder", "data": {"order_id": "WO2"},
-        }),
+        (make_tool_call("write_record", "t1"), {}),
         (make_tool_call("lookup_asset", "t2"), {"asset_id": "A1"}),
     ], state)
 
     assert [tc.id for tc, _, _ in results] == ["t1"]
     assert results[0][2].needs_confirmation
+
+
+def test_tool_executor_stops_before_later_calls_when_user_input_needed():
+    harness = make_harness()
+    executor = ToolExecutor(harness)
+    state = RunState(messages=[], session_id="s1", user_question="")
+
+    results = executor.execute_tool_calls([
+        (make_tool_call("ask_user", "t1"), {
+            "question": "Choose?",
+            "options": [{"label": "A"}],
+        }),
+        (make_tool_call("lookup_asset", "t2"), {"asset_id": "A1"}),
+    ], state)
+
+    assert [tc.id for tc, _, _ in results] == ["t1"]
+    assert results[0][2].needs_user_input
 
 
 def test_query_loop_records_final_response_transition(monkeypatch):
@@ -1089,8 +1335,11 @@ def test_query_loop_records_final_response_transition(monkeypatch):
     events = list(loop.run(state))
     trace_events = harness.trace.snapshot()
 
-    assert [event.type for event in events] == ["debug", "debug", "text"]
-    assert events[-1].content == "This is a complete final answer for the user."
+    assert [event.type for event in events] == [
+        "debug", "debug", "assistant_delta", "assistant_end",
+    ]
+    assert events[-2].content == "This is a complete final answer for the user."
+    assert events[-1].kind == "final"
     assert pending == []
     assert any(event.event_type == "context_usage" for event in trace_events)
     assert trace_events[-1].event_type == "agent_transition"
@@ -1128,9 +1377,15 @@ def test_query_loop_finalizes_without_tools_after_turn_limit(monkeypatch):
     trace_events = harness.trace.snapshot()
 
     assert len(calls) == 2
-    assert events[-1].type == "text"
-    assert events[-1].content == "Based on the retrieved record, asset A1 is available."
-    assert all("最大轮次" not in event.content for event in events if event.type == "text")
+    assert events[-2].type == "assistant_delta"
+    assert events[-2].content == "Based on the retrieved record, asset A1 is available."
+    assert events[-1].type == "assistant_end"
+    assert events[-1].kind == "final"
+    assert all(
+        "最大轮次" not in event.content
+        for event in events
+        if event.type == "assistant_delta"
+    )
     assert messages[-1] == {
         "role": "assistant",
         "content": "Based on the retrieved record, asset A1 is available.",
@@ -1166,7 +1421,9 @@ def test_query_loop_emits_reasoning_event_without_persisting_it(monkeypatch):
 
     events = list(loop.run(state))
 
-    assert [event.type for event in events] == ["debug", "debug", "reasoning", "text"]
+    assert [event.type for event in events] == [
+        "debug", "debug", "reasoning", "assistant_delta", "assistant_end",
+    ]
     assert events[2].content == "Internal reasoning trace."
     assert all("Internal reasoning trace." not in msg.get("content", "") for msg in messages)
 
@@ -1195,16 +1452,121 @@ def test_query_loop_streams_reasoning_and_text_without_duplicate_final_text(monk
 
     events = list(loop.run(state))
 
-    assert [event.type for event in events] == ["debug", "reasoning", "reasoning", "text", "text", "debug"]
+    assert [event.type for event in events] == [
+        "debug",
+        "reasoning",
+        "reasoning",
+        "assistant_delta",
+        "assistant_delta",
+        "debug",
+        "assistant_end",
+    ]
     assert [event.content for event in events if event.type == "reasoning"] == ["Think ", "step."]
-    assert [event.content for event in events if event.type == "text"] == [
+    assert [event.content for event in events if event.type == "assistant_delta"] == [
         "This is a complete ",
         "final answer for the user.",
     ]
+    assert [event.kind for event in events if event.type == "assistant_end"] == ["final"]
     assert messages[-1] == {
         "role": "assistant",
         "content": "This is a complete final answer for the user.",
     }
+
+
+def test_query_loop_separates_tool_progress_from_final_text(monkeypatch):
+    harness = make_harness()
+    calls = 0
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return iter([
+                make_stream_chunk(content="I will look that up."),
+                make_stream_chunk(tool_call=make_tool_delta(
+                    0,
+                    tool_id="tool_1",
+                    name="lookup_asset",
+                    arguments='{"asset_id":"A1"}',
+                )),
+            ])
+        return iter([make_stream_chunk(content="Asset A1 is available.")])
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "Explain A1"},
+    ]
+
+    events = list(loop.run(RunState(
+        messages=messages,
+        session_id="s1",
+        user_question="Explain A1",
+    )))
+
+    assert [event.content for event in events if event.type == "assistant_delta"] == [
+        "I will look that up.",
+        "Asset A1 is available.",
+    ]
+    assert [event.kind for event in events if event.type == "assistant_end"] == [
+        "progress",
+        "final",
+    ]
+    assert messages[-1] == {
+        "role": "assistant",
+        "content": "Asset A1 is available.",
+    }
+    response_traces = [
+        event for event in harness.trace.snapshot()
+        if event.event_type == "assistant_response"
+    ]
+    assert [event.payload["kind"] for event in response_traces] == [
+        "progress", "final",
+    ]
+    assert response_traces[0].payload["content"] == "I will look that up."
+    assert response_traces[1].payload["content"] == "Asset A1 is available."
+
+
+def test_query_loop_does_not_trace_empty_tool_preface(monkeypatch):
+    harness = make_harness()
+    calls = 0
+
+    def fake_call_llm_with_retry(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return make_response(tool_calls=[
+                make_full_tool_call("lookup_asset", "tool_1", '{"asset_id":"A1"}'),
+            ])
+        return make_response(content="Asset A1 is available.")
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+    loop = QueryLoop(
+        harness,
+        DummyClient(),
+        "dummy-model",
+        on_pending_confirmation=lambda *args: None,
+    )
+    messages = [{"role": "user", "content": "Explain A1"}]
+
+    list(loop.run(RunState(
+        messages=messages,
+        session_id="s1",
+        user_question="Explain A1",
+    )))
+
+    response_traces = [
+        event for event in harness.trace.snapshot()
+        if event.event_type == "assistant_response"
+    ]
+    assert len(response_traces) == 1
+    assert response_traces[0].payload["kind"] == "final"
 
 
 def test_query_loop_aggregates_streaming_tool_calls(monkeypatch):
@@ -1228,36 +1590,28 @@ def test_query_loop_aggregates_streaming_tool_calls(monkeypatch):
 
     events = list(loop.run(state))
 
-    assert [event.type for event in events[:4]] == ["debug", "debug", "tool_call", "tool_result"]
-    assert events[2].name == "lookup_asset"
-    assert events[2].args == {"asset_id": "A1"}
-    assert '"asset_id": "A1"' in events[3].result
+    assert [event.type for event in events[:5]] == [
+        "debug", "debug", "assistant_end", "tool_call", "tool_result",
+    ]
+    assert events[3].name == "lookup_asset"
+    assert events[3].args == {"asset_id": "A1"}
+    assert '"asset_id": "A1"' in events[4].result
     assert messages[2]["tool_calls"][0]["function"]["arguments"] == '{"asset_id":"A1"}'
 
 
-def test_query_loop_emits_presentation_event_from_tool_result(monkeypatch):
-    harness = make_harness()
-    harness.tools.register(ToolDef(
-        name="ui_open_form",
-        description="Open a frontend form",
-        parameters={"type": "object", "properties": {}},
-        handler=lambda args: json.dumps({
-            "message": "form opened",
-            "presentation": {
-                "kind": "action_form",
-                "action": {"id": "register_customer"},
-            },
-        }),
-        category="ui",
-    ))
+def test_query_loop_emits_interaction_event_for_action_input(monkeypatch):
+    harness = make_harness(include_actions=True)
 
     def fake_call_llm_with_retry(*args, **kwargs):
-        calls = kwargs["messages"]
-        if not any(message.get("role") == "tool" for message in calls):
+        if not any(message.get("role") == "tool" for message in kwargs["messages"]):
             return make_response(tool_calls=[
-                make_full_tool_call("ui_open_form", "tool_ui", "{}"),
+                make_full_tool_call(
+                    "request_action_input",
+                    "tool_interaction",
+                    '{"action_id":"create_work_order","context_id":"A1"}',
+                ),
             ])
-        return make_response(content="The form is open.")
+        return make_response(content="Waiting for input.")
 
     monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
     loop = QueryLoop(
@@ -1266,23 +1620,30 @@ def test_query_loop_emits_presentation_event_from_tool_result(monkeypatch):
         "dummy-model",
         on_pending_confirmation=lambda *args: None,
     )
-    messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Open form"}]
-    events = list(loop.run(RunState(messages=messages, session_id="s1", user_question="Open form")))
+    messages = [
+        {"role": "system", "content": "System prompt"},
+        {"role": "user", "content": "Create work order"},
+    ]
 
-    event_types = [event.type for event in events]
-    assert event_types[:5] == ["debug", "debug", "tool_call", "tool_result", "presentation"]
-    presentation = next(event for event in events if event.type == "presentation")
-    assert presentation.name == "ui_open_form"
-    assert presentation.payload["kind"] == "action_form"
+    events = list(loop.run(RunState(
+        messages=messages,
+        session_id="s1",
+        user_question="Create work order",
+    )))
+
+    interaction = next(event for event in events if event.type == "interaction")
+    assert interaction.name == "request_action_input"
+    assert interaction.payload["kind"] == "action_form"
+    assert interaction.payload["context_id"] == "A1"
 
 
-def test_query_loop_ignores_presentation_payload_from_non_ui_tool(monkeypatch):
+def test_query_loop_ignores_interaction_payload_from_non_interaction_tool(monkeypatch):
     harness = make_harness()
     harness.tools.register(ToolDef(
         name="ordinary_query",
         description="Return ordinary domain data",
         parameters={"type": "object", "properties": {}},
-        handler=lambda args: json.dumps({"presentation": {"kind": "untrusted"}}),
+        handler=lambda args: json.dumps({"interaction": {"kind": "untrusted"}}),
         category="query",
     ))
 
@@ -1303,11 +1664,12 @@ def test_query_loop_ignores_presentation_payload_from_non_ui_tool(monkeypatch):
     messages = [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Query"}]
     events = list(loop.run(RunState(messages=messages, session_id="s1", user_question="Query")))
 
-    assert all(event.type != "presentation" for event in events)
+    assert all(event.type != "interaction" for event in events)
 
 
 def test_confirmation_required_stops_before_later_tool_calls(monkeypatch):
     harness = make_harness(HarnessConfig(enable_write_confirmation=True))
+    register_confirmed_write_tool(harness)
     executed = []
     original_execute = harness.execute_tool
 
@@ -1320,10 +1682,7 @@ def test_confirmation_required_stops_before_later_tool_calls(monkeypatch):
 
     def fake_call_llm_with_retry(*args, **kwargs):
         return make_response(tool_calls=[
-        make_full_tool_call(
-            "mutate", "tool_1",
-            '{"operation":"create","object_type":"WorkOrder","data":{"order_id":"WO2"}}',
-        ),
+            make_full_tool_call("write_record", "tool_1", '{}'),
             make_full_tool_call("lookup_asset", "tool_2", '{"asset_id":"A1"}'),
         ])
 
@@ -1339,10 +1698,12 @@ def test_confirmation_required_stops_before_later_tool_calls(monkeypatch):
 
     events = list(loop.run(state))
 
-    assert [event.type for event in events] == ["debug", "debug", "tool_call", "confirmation_required"]
-    assert events[2].name == "mutate"
-    assert events[2].args["object_type"] == "WorkOrder"
-    assert executed == ["mutate"]
+    assert [event.type for event in events] == [
+        "debug", "debug", "assistant_end", "tool_call", "confirmation_required",
+    ]
+    assert events[3].name == "write_record"
+    assert events[3].args == {}
+    assert executed == ["write_record"]
     assert len(pending) == 1
     assert pending[0][6] == [{"tool_call_id": "tool_2", "content": '{"skipped": true, "reason": "前一个工具调用需要用户确认，本调用未执行"}'}]
     assert all(m.get("tool_call_id") != "tool_2" for m in messages)
@@ -1370,9 +1731,10 @@ def test_confirmation_flow_appends_skipped_tool_results_in_order():
         tool_call_id="tool_1",
         messages=messages,
         skipped_tool_calls=[{"tool_call_id": "tool_2", "content": '{"skipped": true}'}],
+        expects_answer=True,
         user_question="Original question",
         turn_count=3,
-        stop_hook_active=True,
+        query_complete_retry_active=True,
     )
 
     list(flow.confirm(pending, approved=True, answer="A"))
@@ -1380,7 +1742,7 @@ def test_confirmation_flow_appends_skipped_tool_results_in_order():
     assert [m.get("tool_call_id") for m in messages if m["role"] == "tool"] == ["tool_1", "tool_2"]
     assert continued_states[0].user_question == "Original question"
     assert continued_states[0].turn_count == 3
-    assert continued_states[0].stop_hook_active is True
+    assert continued_states[0].query_complete_retry_active is True
 
 
 def test_query_loop_invalid_tool_json_returns_tool_error(monkeypatch):
@@ -1483,7 +1845,8 @@ def test_query_loop_force_compacts_and_retries_on_context_overflow(monkeypatch):
     assert len(calls) == 2
     assert len(force_calls) == 1
     assert any(event.type == "compact" for event in events)
-    assert events[-1].content == "This recovered response fully answers the user question."
+    assert events[-2].content == "This recovered response fully answers the user question."
+    assert events[-1].kind == "final"
 
 
 def test_context_compaction_preserves_tool_call_pairs(monkeypatch):
@@ -1538,8 +1901,8 @@ def test_confirmation_flow_denial_saves_rejection_messages():
     messages = [{"role": "system", "content": "System prompt"}]
     pending = PendingConfirmation(
         session_id="s1",
-        tool_name="mutate",
-        args={"operation": "create"},
+        tool_name="write_record",
+        args={},
         tool_call_id="tool_1",
         messages=messages,
     )
@@ -1547,12 +1910,12 @@ def test_confirmation_flow_denial_saves_rejection_messages():
     events = list(flow.confirm(pending, approved=False))
 
     assert [event.type for event in events] == ["text"]
-    assert events[0].content == "已取消 mutate 的执行。"
+    assert events[0].content == "已取消 write_record 的执行。"
     assert saved == [("s1", messages)]
     assert messages[-2]["role"] == "tool"
     assert "用户拒绝执行" in messages[-2]["content"]
     assert messages[-1]["role"] == "user"
-    assert "用户拒绝了 mutate" in messages[-1]["content"]
+    assert "用户拒绝了 write_record" in messages[-1]["content"]
 
 
 def test_session_store_persists_and_lists_sessions(tmp_path):
@@ -1574,7 +1937,7 @@ def test_message_sanitizer_repairs_missing_tool_results():
         {"role": "user", "content": "Lookup"},
         {"role": "assistant", "content": "", "tool_calls": [
             {"id": "tool_1", "type": "function", "function": {"name": "lookup_asset", "arguments": "{}"}},
-            {"id": "tool_2", "type": "function", "function": {"name": "count", "arguments": "{}"}},
+            {"id": "tool_2", "type": "function", "function": {"name": "query", "arguments": "{}"}},
         ]},
         {"role": "tool", "tool_call_id": "tool_1", "content": "{}"},
         {"role": "user", "content": "Continue"},
@@ -1621,7 +1984,7 @@ def test_session_store_sanitizes_loaded_history(tmp_path):
     assert loaded[-1]["tool_call_id"] == "tool_1"
 
 
-def test_stop_check_treats_empty_latest_assistant_as_incomplete():
+def test_query_complete_has_no_default_policy():
     harness = make_harness()
     messages = [
         {"role": "system", "content": "System prompt"},
@@ -1631,10 +1994,9 @@ def test_stop_check_treats_empty_latest_assistant_as_incomplete():
         {"role": "assistant", "content": ""},
     ]
 
-    result = harness.run_stop_check("Question", messages)
+    result = harness.run_query_complete_hooks("Question", messages)
 
-    assert result is not None
-    assert "未生成最终回答" in result
+    assert result is None
 
 
 def test_query_loop_filters_tools_per_run_allowed_tools(monkeypatch):
@@ -1672,61 +2034,28 @@ def test_query_loop_filters_tools_per_run_allowed_tools(monkeypatch):
     events = list(loop.run(state))
 
     assert captured["tools"] == [available[0]]
-    assert events[-1].type == "text"
+    assert events[-2].type == "assistant_delta"
+    assert events[-2].content == "Done."
+    assert events[-1].type == "assistant_end"
+    assert events[-1].kind == "final"
 
 
-def test_stop_check_blocks_success_claim_after_unhandled_tool_error():
+def test_query_complete_runs_caller_registered_hook():
     harness = make_harness()
     messages = [
         {"role": "system", "content": "System prompt"},
-        {"role": "user", "content": "Create work order"},
-        {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "tool_1", "type": "function", "function": {"name": "create_work_order", "arguments": "{}"}},
-        ]},
-        {"role": "tool", "tool_call_id": "tool_1", "content": '{"error": "backend unavailable"}'},
-        {"role": "assistant", "content": "处理完成，推荐方案如下。"},
+        {"role": "user", "content": "Question"},
+        {"role": "assistant", "content": "Incomplete"},
     ]
+    captured = []
+    harness.register_query_complete_hook(
+        lambda context: (
+            captured.append(context)
+            or HookResult(action="pause", reason="missing evidence")
+        ),
+    )
 
-    result = harness.run_stop_check("Create work order", messages)
+    result = harness.run_query_complete_hooks("Question", messages)
 
-    assert result is not None
-    assert "有工具执行出错未处理" in result
-    assert "backend unavailable" in result
-
-
-def test_stop_check_allows_success_after_same_tool_error_is_recovered():
-    harness = make_harness()
-    messages = [
-        {"role": "system", "content": "System prompt"},
-        {"role": "user", "content": "Create work order"},
-        {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "tool_1", "type": "function", "function": {"name": "create_work_order", "arguments": "{}"}},
-        ]},
-        {"role": "tool", "tool_call_id": "tool_1", "content": '{"error": "backend unavailable"}'},
-        {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "tool_2", "type": "function", "function": {"name": "create_work_order", "arguments": "{}"}},
-        ]},
-        {"role": "tool", "tool_call_id": "tool_2", "content": '{"order_id": "WO1"}'},
-        {"role": "assistant", "content": "处理完成，已成功创建工单 WO1，后续可以按该工单继续跟踪执行状态。"},
-    ]
-
-    result = harness.run_stop_check("Create work order", messages)
-
-    assert result is None
-
-
-def test_stop_check_allows_explicit_failure_answer_after_tool_error():
-    harness = make_harness()
-    messages = [
-        {"role": "system", "content": "System prompt"},
-        {"role": "user", "content": "Create work order"},
-        {"role": "assistant", "content": "", "tool_calls": [
-            {"id": "tool_1", "type": "function", "function": {"name": "create_work_order", "arguments": "{}"}},
-        ]},
-        {"role": "tool", "tool_call_id": "tool_1", "content": '{"error": "backend unavailable"}'},
-        {"role": "assistant", "content": "任务未完成，工具 create_work_order 执行失败，错误为 backend unavailable，需要重试或检查服务状态。"},
-    ]
-
-    result = harness.run_stop_check("Create work order", messages)
-
-    assert result is None
+    assert captured == [{"messages": messages, "user_question": "Question"}]
+    assert "missing evidence" in result

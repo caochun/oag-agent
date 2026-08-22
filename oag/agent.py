@@ -9,17 +9,21 @@ from __future__ import annotations
 import uuid
 from pathlib import Path
 from time import monotonic
-from typing import Iterable, Generator
+from typing import Generator, Iterable
 
 from openai import OpenAI
 
-from .runtime.events import (
-    Event, TextEvent, event_to_dict,
-)
 from .harness import Harness
 from .loop.confirmation_flow import ConfirmationFlow
 from .loop.query_loop import QueryLoop
 from .runtime import PendingConfirmation, RunState
+from .runtime.events import (
+    AssistantDeltaEvent,
+    AssistantEndEvent,
+    Event,
+    TextEvent,
+    event_to_dict,
+)
 from .runtime.session_store import SessionStore
 
 
@@ -51,10 +55,17 @@ class Agent:
 
     def chat(self, message: str, session_id: str = "default",
              allowed_tools: Iterable[str] | None = None) -> str:
-        result_parts = []
+        result_parts: list[str] = []
+        turn_parts: list[str] = []
         for event in self.chat_stream(message, session_id, allowed_tools=allowed_tools):
             if isinstance(event, TextEvent):
                 result_parts.append(event.content)
+            elif isinstance(event, AssistantDeltaEvent):
+                turn_parts.append(event.content)
+            elif isinstance(event, AssistantEndEvent):
+                if event.kind == "final":
+                    result_parts.append("".join(turn_parts))
+                turn_parts.clear()
         return "".join(result_parts)
 
     def has_pending(self, session_id: str) -> bool:
@@ -83,10 +94,14 @@ class Agent:
             return
 
         messages = self.sessions.get(session_id)
+        system_prompt = self.harness.build_system_prompt()
 
         if not messages:
-            system_prompt = self.harness.build_system_prompt()
             messages.append({"role": "system", "content": system_prompt})
+        elif messages[0].get("role") == "system":
+            messages[0] = {"role": "system", "content": system_prompt}
+        else:
+            messages.insert(0, {"role": "system", "content": system_prompt})
 
         messages.append({"role": "user", "content": message})
         self.sessions.save(session_id, messages)
@@ -99,28 +114,35 @@ class Agent:
             user_question=message,
             allowed_tools=frozenset(allowed_tools) if allowed_tools is not None else None,
         )
-        streamed_content = ""
+        turn_content = ""
+        final_content = ""
         completed = False
         last_snapshot_at = monotonic()
         last_snapshot_len = 0
         try:
             for event in self._run_loop(state):
-                if isinstance(event, TextEvent) and event.content:
-                    streamed_content += event.content
+                if isinstance(event, AssistantDeltaEvent) and event.content:
+                    turn_content += event.content
+                elif isinstance(event, AssistantEndEvent):
+                    if event.kind == "final":
+                        final_content += turn_content
+                    turn_content = ""
+
+                if final_content:
                     now = monotonic()
                     if (
-                        len(streamed_content) - last_snapshot_len >= 512
+                        len(final_content) - last_snapshot_len >= 512
                         or now - last_snapshot_at >= 1.0
                     ):
-                        self._save_stream_snapshot(session_id, messages, streamed_content)
+                        self._save_stream_snapshot(session_id, messages, final_content)
                         last_snapshot_at = now
-                        last_snapshot_len = len(streamed_content)
+                        last_snapshot_len = len(final_content)
                 yield event
             completed = True
             self.sessions.save(session_id, messages)
         finally:
-            if not completed and streamed_content:
-                self._save_stream_snapshot(session_id, messages, streamed_content)
+            if not completed and final_content:
+                self._save_stream_snapshot(session_id, messages, final_content)
             self.harness.clear_tool_cache_namespace(cache_namespace)
 
     def _run_loop(self, state: RunState) -> Generator[Event, None, None]:
@@ -139,7 +161,8 @@ class Agent:
     def _set_pending_confirmation(self, session_id: str, tool_name: str, args: dict,
                                   tool_call_id: str, messages: list[dict],
                                   state: RunState,
-                                  skipped_tool_calls: list[dict] | None = None):
+                                  skipped_tool_calls: list[dict] | None = None,
+                                  expects_answer: bool = False):
         self._pending[session_id] = PendingConfirmation(
             session_id=session_id,
             tool_name=tool_name,
@@ -148,10 +171,11 @@ class Agent:
             messages=messages,
             cache_namespace=state.cache_namespace,
             skipped_tool_calls=skipped_tool_calls,
+            expects_answer=expects_answer,
             user_question=state.user_question,
             allowed_tools=state.allowed_tools,
             turn_count=state.turn_count,
-            stop_hook_active=state.stop_hook_active,
+            query_complete_retry_active=state.query_complete_retry_active,
         )
 
     def sessions_save(self, session_id: str, messages: list[dict]):

@@ -1,41 +1,37 @@
 """主 LLM 回合循环。
 
 QueryLoop 负责把消息和工具发给模型、记录调试事件、执行模型请求的工具、
-处理确认暂停，并在最终回答前运行 stop check。它不直接实现工具策略。
+处理确认暂停，并在最终回答后触发通用完成 hook。它不直接实现工具策略。
 """
 
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Callable, Generator
 
 from openai import APIStatusError, OpenAI
 
-from .tool_executor import ToolExecutor
-from ..runtime.events import (
-    CompactEvent, ConfirmationEvent, DebugEvent, Event, QuestionEvent,
-    PresentationEvent, ReasoningEvent, TextEvent, ToolCallEvent, ToolResultEvent,
-)
 from ..llm.retry import call_llm_with_retry
 from ..runtime import RunState
-from ..tools.pipeline import ToolResult
+from ..runtime.events import (
+    AssistantDeltaEvent,
+    AssistantEndEvent,
+    CompactEvent,
+    DebugEvent,
+    Event,
+    ToolCallEvent,
+)
 from ..runtime.message_sanitizer import sanitize_messages
+from ..tools.pipeline import ToolResult
+from .response_parser import LlmResponseParser
+from .tool_call_coordinator import ToolCallCoordinator, ToolExecutionPaused
+from .tool_executor import ToolExecutor
 
 if TYPE_CHECKING:
     from ..harness import Harness
 
 
-PendingConfirmationHandler = Callable[[str, str, dict, str, list[dict], RunState, list[dict] | None], None]
-MAX_REASONING_CHARS = 5000
-
-
-class _ToolExecutionPaused(Exception):
-    def __init__(self, events: list[Event]):
-        super().__init__("tool execution paused")
-        self.events = events
-
-
+PendingConfirmationHandler = Callable[[str, str, dict, str, list[dict], RunState, list[dict] | None, bool], None]
 class QueryLoop:
     def __init__(self, harness: Harness, llm_client: OpenAI, model: str,
                  on_pending_confirmation: PendingConfirmationHandler):
@@ -44,6 +40,12 @@ class QueryLoop:
         self.model = model
         self.on_pending_confirmation = on_pending_confirmation
         self.tool_executor = ToolExecutor(harness)
+        self.response_parser = LlmResponseParser()
+        self.tool_coordinator = ToolCallCoordinator(
+            harness,
+            self.tool_executor,
+            on_pending_confirmation,
+        )
 
     def run(self, state: RunState) -> Generator[Event, None, None]:
         tools = self._filter_tools_for_run(self.harness.build_tools(), state.allowed_tools)
@@ -68,7 +70,7 @@ class QueryLoop:
                 session_id=state.session_id,
                 turn_count=state.turn_count,
                 message_count=len(messages),
-                stop_hook_active=state.stop_hook_active,
+                query_complete_retry_active=state.query_complete_retry_active,
                 allowed_tool_count=len(visible_tool_names),
                 allowed_tools=sorted(visible_tool_names) if state.allowed_tools is not None else None,
             )
@@ -124,9 +126,16 @@ class QueryLoop:
                 yield from self._handle_final_response(
                     state,
                     msg.content or "",
-                    already_streamed=getattr(msg, "content_streamed", False),
                 )
                 return
+
+            self._record_assistant_response(
+                state,
+                msg.content or "",
+                kind="progress",
+                has_tool_calls=True,
+            )
+            yield AssistantEndEvent(kind="progress")
 
             # OpenAI tool protocol 要求先保存 assistant 的 tool_calls envelope，
             # 再追加每个 tool_call_id 对应的 tool 消息。
@@ -159,13 +168,15 @@ class QueryLoop:
                 if parse_error:
                     try:
                         yield from self._execute_tool_call_segment(state, messages, msg, executable_calls)
-                    except _ToolExecutionPaused as paused:
+                    except ToolExecutionPaused as paused:
                         for event in paused.events:
                             yield event
                         return
                     executable_calls = []
                     yield ToolCallEvent(name=tc.function.name, args=args)
-                    yield from self._handle_tool_result(state, messages, msg, index, tc, args, parse_error)
+                    yield from self.tool_coordinator.handle_result(
+                        state, messages, msg, index, tc, args, parse_error,
+                    )
                     continue
                 if tc.function.name not in visible_tool_names:
                     result = ToolResult(
@@ -181,23 +192,24 @@ class QueryLoop:
                         block_reason="工具未对当前领域助手开放",
                     )
                     yield ToolCallEvent(name=tc.function.name, args=args)
-                    yield from self._handle_tool_result(state, messages, msg, index, tc, args, result)
+                    yield from self.tool_coordinator.handle_result(
+                        state, messages, msg, index, tc, args, result,
+                    )
                     continue
                 executable_calls.append((index, tc, args))
             try:
                 yield from self._execute_tool_call_segment(state, messages, msg, executable_calls)
-            except _ToolExecutionPaused as paused:
+            except ToolExecutionPaused as paused:
                 for event in paused.events:
                     yield event
                 return
 
-            state.stop_hook_active = False
-            state.transition_reason = "next_turn"
+            state.query_complete_retry_active = False
             self.harness.trace.record(
                 "agent_transition",
                 session_id=state.session_id,
                 turn_count=state.turn_count,
-                reason=state.transition_reason,
+                reason="next_turn",
             )
 
     def _finalize_at_turn_limit(self, state: RunState) -> Generator[Event, None, None]:
@@ -221,7 +233,6 @@ class QueryLoop:
             )
             msg = yield from self._consume_llm_response(response)
             content = (msg.content or "").strip()
-            already_streamed = getattr(msg, "content_streamed", False)
         except Exception as exc:
             self.harness.trace.record(
                 "agent_turn_limit_finalize_error",
@@ -230,14 +241,14 @@ class QueryLoop:
                 error=str(exc),
             )
             content = "当前已完成可用信息的查询，但未能生成最终总结。请缩小问题范围后重试。"
-            already_streamed = False
+            yield AssistantDeltaEvent(content=content)
 
         if not content:
             content = "当前没有足够的已确认信息来回答该问题，请缩小问题范围后重试。"
-            already_streamed = False
+            yield AssistantDeltaEvent(content=content)
         state.messages.append({"role": "assistant", "content": content})
-        if not already_streamed:
-            yield TextEvent(content=content)
+        self._record_assistant_response(state, content, kind="final")
+        yield AssistantEndEvent(kind="final")
         self.harness.trace.record(
             "agent_transition",
             session_id=state.session_id,
@@ -247,140 +258,67 @@ class QueryLoop:
 
     def _execute_tool_call_segment(self, state: RunState, messages: list[dict], msg,
                                    executable_calls: list[tuple[int, object, dict]]) -> Generator[Event, None, None]:
-        if not executable_calls:
-            return
-
-        index_by_tool_call_id = {tc.id: index for index, tc, _ in executable_calls}
-        pending_events: list[Event] = []
-
-        def handle_executed_result(tc, args, result):
-            index = index_by_tool_call_id[tc.id]
-            for event in self._handle_tool_result(state, messages, msg, index, tc, args, result):
-                pending_events.append(event)
-
-        try:
-            parsed = [(tc, args) for _, tc, args in executable_calls]
-            for batch in self.tool_executor.partition_tool_calls(parsed):
-                for tc, args in batch:
-                    yield ToolCallEvent(
-                        name=tc.function.name,
-                        args=args,
-                    )
-                batch_results = self.tool_executor.execute_batch(batch, state)
-                for tc, args, result in batch_results:
-                    handle_executed_result(tc, args, result)
-                if any(result.needs_confirmation for _tc, _args, result in batch_results):
-                    break
-        except _ToolExecutionPaused:
-            raise _ToolExecutionPaused(pending_events)
-        for event in pending_events:
-            yield event
-
-    def _handle_tool_result(self, state: RunState, messages: list[dict], msg,
-                            index: int, tc, args: dict,
-                            result: ToolResult) -> Generator[Event, None, None]:
-        if result.needs_confirmation:
-            # 暂停当前循环并保存现场；用户响应后由 ConfirmationFlow 继续。
-            skipped_tool_calls = self._build_skipped_tool_calls(msg.tool_calls[index + 1:])
-            self.harness.trace.record(
-                "agent_transition",
-                session_id=state.session_id,
-                turn_count=state.turn_count,
-                reason="confirmation_required",
-                tool_name=tc.function.name,
-            )
-            self.on_pending_confirmation(
-                state.session_id,
-                tc.function.name,
-                args,
-                tc.id,
-                messages,
-                state,
-                skipped_tool_calls,
-            )
-            if tc.function.name == "ask_user":
-                yield QuestionEvent(
-                    question=args.get("question", ""),
-                    options=args.get("options", []),
-                    multi_select=args.get("multi_select", False),
-                )
-            else:
-                yield ConfirmationEvent(
-                    tool_name=tc.function.name,
-                    args=args,
-                    reason=result.block_reason,
-                )
-            raise _ToolExecutionPaused([])
-
-        yield ToolResultEvent(
-            name=tc.function.name,
-            result=result.content[:self._tool_result_preview_len(tc.function.name)],
-            blocked=bool(result.blocked),
+        yield from self.tool_coordinator.execute_segment(
+            state, messages, msg, executable_calls,
         )
 
-        presentation = self._presentation_payload(tc.function.name, result.content)
-        if presentation is not None:
-            yield PresentationEvent(
-                name=tc.function.name,
-                payload=presentation,
-            )
-
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tc.id,
-            "content": result.content,
-        })
-
-        if result.blocked:
-            messages.append({
-                "role": "user",
-                "content": f"[系统提示] 工具 {tc.function.name} 被阻止: {result.block_reason}",
-            })
-
-    def _presentation_payload(self, tool_name: str, content: str) -> dict | None:
-        """Extract the reserved payload only from a registered UI tool."""
-        tool = self.harness.tools.get(tool_name)
-        if tool is None or tool.category != "ui":
-            return None
-        try:
-            value = json.loads(content)
-        except (TypeError, json.JSONDecodeError):
-            return None
-        if not isinstance(value, dict):
-            return None
-        presentation = value.get("presentation")
-        return presentation if isinstance(presentation, dict) else None
-
-    def _tool_result_preview_len(self, tool_name: str) -> int:
-        return 5000 if tool_name == "dispatch_workers" else 200
-
     def _handle_final_response(self, state: RunState,
-                               content: str,
-                               already_streamed: bool = False) -> Generator[Event, None, None]:
+                               content: str) -> Generator[Event, None, None]:
         messages = state.messages
         messages.append({"role": "assistant", "content": content})
-        if not already_streamed:
-            yield TextEvent(content=content)
 
-        stop_result = self.harness.run_stop_check(state.user_question, messages)
-        if stop_result and not state.stop_hook_active:
-            state.stop_hook_active = True
-            state.transition_reason = "stop_hook_blocking"
+        completion_feedback = self.harness.run_query_complete_hooks(
+            state.user_question,
+            messages,
+        )
+        if completion_feedback and not state.query_complete_retry_active:
+            self._record_assistant_response(
+                state,
+                content,
+                kind="progress",
+                classification_reason="query_complete_retry",
+            )
+            yield AssistantEndEvent(kind="progress")
+            state.query_complete_retry_active = True
             self.harness.trace.record(
                 "agent_transition",
                 session_id=state.session_id,
                 turn_count=state.turn_count,
-                reason=state.transition_reason,
+                reason="query_complete_retry",
             )
-            messages.append({"role": "user", "content": stop_result})
+            messages.append({"role": "user", "content": completion_feedback})
             yield from self.run(state)
             return
 
+        self._record_assistant_response(state, content, kind="final")
+        yield AssistantEndEvent(kind="final")
         self.harness.trace.record(
             "agent_transition",
             session_id=state.session_id,
             turn_count=state.turn_count,
             reason="final_response",
+        )
+
+    def _record_assistant_response(
+        self,
+        state: RunState,
+        content: str,
+        *,
+        kind: str,
+        has_tool_calls: bool = False,
+        classification_reason: str = "",
+    ) -> None:
+        if not content and kind == "progress":
+            return
+        self.harness.trace.record(
+            "assistant_response",
+            session_id=state.session_id,
+            turn_count=state.turn_count,
+            kind=kind,
+            has_tool_calls=has_tool_calls,
+            content_chars=len(content),
+            content=content,
+            classification_reason=classification_reason,
         )
 
     def _build_request_debug_event(self, state: RunState) -> DebugEvent:
@@ -403,15 +341,6 @@ class QueryLoop:
             stage="request",
             content=f"Turn {state.turn_count}, {len(state.messages)} msgs\n" + "\n".join(debug_msgs),
         )
-
-    def _build_response_debug_event(self, msg) -> DebugEvent:
-        resp_summary = ""
-        if msg.tool_calls:
-            tc_list = [f"{tc.function.name}({tc.function.arguments[:80]})" for tc in msg.tool_calls]
-            resp_summary = "LLM选择调用: " + "; ".join(tc_list)
-        if msg.content:
-            resp_summary += f"\nLLM文本: {msg.content[:300]}"
-        return DebugEvent(stage="response", content=resp_summary)
 
     def _record_context_usage(self, state: RunState, tools: list[dict]):
         usage = self.harness.collect_context_usage(state.messages, tools)
@@ -454,81 +383,9 @@ class QueryLoop:
             if tool.get("function", {}).get("name") in allowed_tools
         ]
 
-    def _consume_llm_response(self, response) -> Generator[Event, None, SimpleNamespace]:
-        if hasattr(response, "choices") and response.choices:
-            msg = response.choices[0].message
-            msg.content_streamed = False
-            yield self._build_response_debug_event(msg)
-            if reasoning := self._extract_reasoning_from_message(msg):
-                yield ReasoningEvent(content=reasoning)
-            return msg
-
-        content_parts: list[str] = []
-        reasoning_chars = 0
-        tool_call_parts: dict[int, dict] = {}
-
-        for chunk in response:
-            if not chunk.choices:
-                continue
-            choice = chunk.choices[0]
-            delta = choice.delta
-
-            if reasoning_delta := self._extract_reasoning_from_message(delta):
-                remaining = MAX_REASONING_CHARS - reasoning_chars
-                if remaining > 0:
-                    emitted = reasoning_delta[:remaining]
-                    reasoning_chars += len(emitted)
-                    yield ReasoningEvent(content=emitted)
-                    if len(reasoning_delta) > remaining:
-                        yield ReasoningEvent(content="\n[... reasoning 已截断]")
-                        reasoning_chars = MAX_REASONING_CHARS
-
-            if delta.content:
-                content_parts.append(delta.content)
-                yield TextEvent(content=delta.content)
-
-            for tc_delta in delta.tool_calls or []:
-                index = tc_delta.index
-                entry = tool_call_parts.setdefault(
-                    index,
-                    {"id": "", "type": "function", "name": "", "arguments": []},
-                )
-                if tc_delta.id:
-                    entry["id"] = tc_delta.id
-                if tc_delta.type:
-                    entry["type"] = tc_delta.type
-                if tc_delta.function:
-                    if tc_delta.function.name:
-                        entry["name"] = tc_delta.function.name
-                    if tc_delta.function.arguments:
-                        entry["arguments"].append(tc_delta.function.arguments)
-
-        msg = SimpleNamespace(
-            content="".join(content_parts),
-            content_streamed=bool(content_parts),
-            tool_calls=[
-                SimpleNamespace(
-                    id=entry["id"],
-                    type=entry["type"],
-                    function=SimpleNamespace(
-                        name=entry["name"],
-                        arguments="".join(entry["arguments"]),
-                    ),
-                )
-                for _, entry in sorted(tool_call_parts.items())
-                if entry["name"]
-            ] or None,
-        )
-        yield self._build_response_debug_event(msg)
-        return msg
-
-    def _extract_reasoning_from_message(self, msg) -> str:
-        # llama-server exposes reasoning as an OpenAI-compatible extra field.
-        reasoning = getattr(msg, "reasoning_content", None)
-        if not reasoning:
-            extra = getattr(msg, "model_extra", None) or {}
-            reasoning = extra.get("reasoning_content")
-        return str(reasoning) if reasoning else ""
+    def _consume_llm_response(self, response):
+        message = yield from self.response_parser.consume(response)
+        return message
 
     def _compact_before_request(self, state: RunState) -> Generator[Event, None, None]:
         messages, compacted = self.harness.maybe_compact(state.messages)

@@ -12,7 +12,6 @@ from typing import Any
 
 from .context import count_messages_tokens, estimate_tokens
 
-
 DEFAULT_CONTEXT_WINDOW = 128000
 
 

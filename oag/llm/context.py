@@ -6,9 +6,6 @@
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from openai import OpenAI
 
 from .retry import call_llm_with_retry
@@ -23,7 +20,7 @@ COMPACT_PROMPT = """\
 对话历史：
 {history}
 
-请用中文输出摘要，300字以内："""
+Use the same language as the conversation and keep the summary under 300 words:"""
 
 
 def estimate_tokens(text: str) -> int:
@@ -44,12 +41,6 @@ def count_messages_tokens(messages: list[dict]) -> int:
                 fn = tc.get("function", {})
                 total += estimate_tokens(fn.get("name", "") + fn.get("arguments", ""))
     return total
-
-
-def truncate_tool_result(result: str, max_chars: int = 5000) -> str:
-    if len(result) <= max_chars:
-        return result
-    return result[:max_chars] + f"\n[... 截断，原始长度 {len(result)} 字符]"
 
 
 class ContextManager:
@@ -214,6 +205,3 @@ class ContextManager:
             return response.choices[0].message.content or "(摘要生成失败)"
         except Exception as e:
             return f"(摘要生成失败: {e})"
-
-    def needs_compact(self, messages: list[dict]) -> bool:
-        return count_messages_tokens(messages) >= self.compact_threshold

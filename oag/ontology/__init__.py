@@ -1,16 +1,20 @@
 """本体子系统导出。
 
-ontology 包承载领域真相：YAML schema、对象存储、函数注册、规则执行、
-prompt 构建、运行时验证、显式 inspect、工作流辅助和工具注册。
+ontology 包定义 OAG 可理解的运行时元模型、Provider/Source/Repository 协议，
+并把已编译的领域能力桥接为 prompt 和工具；它不读取领域 DSL 或实现具体存储。
 """
 
 __all__ = [
     "DomainContext",
     "DomainProvider",
     "DataExecutor",
-    "FunctionRegistry",
+    "RuntimeBindings",
     "Ontology",
     "OntologyRepository",
+    "ObjectQuerySource",
+    "ObjectSearchSource",
+    "RelationSource",
+    "SourceManager",
     "OntologyRuntime",
     "RuleEngine",
     "load_domain",
@@ -26,10 +30,10 @@ def __getattr__(name: str):
         from .data_executor import DataExecutor
 
         return DataExecutor
-    if name == "FunctionRegistry":
-        from .registry import FunctionRegistry
+    if name == "RuntimeBindings":
+        from .bindings import RuntimeBindings
 
-        return FunctionRegistry
+        return RuntimeBindings
     if name == "Ontology":
         from .schema import Ontology
 
@@ -38,6 +42,20 @@ def __getattr__(name: str):
         from .repository import OntologyRepository
 
         return OntologyRepository
+    if name in {"ObjectQuerySource", "ObjectSearchSource", "RelationSource", "SourceManager"}:
+        from .source import (
+            ObjectQuerySource,
+            ObjectSearchSource,
+            RelationSource,
+            SourceManager,
+        )
+
+        return {
+            "ObjectQuerySource": ObjectQuerySource,
+            "ObjectSearchSource": ObjectSearchSource,
+            "RelationSource": RelationSource,
+            "SourceManager": SourceManager,
+        }[name]
     if name == "OntologyRuntime":
         from .runtime import OntologyRuntime
 

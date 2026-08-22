@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 
-from .registry import FunctionRegistry
+from .bindings import RuntimeBindings
 from .repository import OntologyRepository
 from .schema import Ontology
+from .source import SourceManager
 
 
 @dataclass(frozen=True)
 class DomainContext:
     """Runtime components passed to a domain after its ontology is loaded."""
 
-    domain_dir: Path
     ontology: Ontology
-    registry: FunctionRegistry
+    bindings: RuntimeBindings
+    sources: SourceManager
     repository: OntologyRepository
 
 
@@ -28,4 +28,4 @@ class DomainProvider(Protocol):
         """Return the final ontology used by every runtime component."""
 
     def register(self, context: DomainContext) -> None:
-        """Register source adapters, runtime services, and functions."""
+        """Bind sources, the Action runtime, and side-effect-free Functions."""

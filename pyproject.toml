@@ -4,12 +4,14 @@ version = "0.1.0"
 description = "OAG — Ontology Augmented Generation agent engine"
 requires-python = ">=3.11"
 dependencies = [
-    "pyyaml>=6.0",
     "pydantic>=2.0",
     "openai>=1.0",
-    "openpyxl>=3.1",
-    "pandas>=2.0",
     "socksio>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
 ]
 
 [build-system]

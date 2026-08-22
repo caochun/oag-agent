@@ -10,7 +10,6 @@ import json
 import operator
 from typing import Any, Callable
 
-from .registry import FunctionRegistry
 from .repository import OntologyRepository
 from .schema import Ontology, RuleCondition, RuleDef
 
@@ -84,8 +83,7 @@ def _compile_rule(rule_def: RuleDef) -> Callable[[dict], Any]:
 
 
 class RuleEngine:
-    def __init__(self, ontology: Ontology, data: OntologyRepository,
-                 registry: FunctionRegistry | None = None):
+    def __init__(self, ontology: Ontology, data: OntologyRepository):
         self.ontology = ontology
         self.store = data
         self._compiled: dict[str, Callable[[dict], Any]] = {}
@@ -99,6 +97,8 @@ class RuleEngine:
         rule_fn = self._compiled.get(rule_name)
         if not rule_fn:
             return {"error": f"未知规则: {rule_name}"}
+        if object_type not in self.ontology.rules[rule_name].applies_to:
+            return {"error": f"规则 {rule_name} 不适用于对象类型 {object_type}"}
 
         record = self.store.get_object(object_type, object_id)
         if not record:
@@ -120,6 +120,8 @@ class RuleEngine:
         rule_fn = self._compiled.get(rule_name)
         if not rule_fn:
             return [{"error": f"未知规则: {rule_name}"}]
+        if object_type not in self.ontology.rules[rule_name].applies_to:
+            return [{"error": f"规则 {rule_name} 不适用于对象类型 {object_type}"}]
 
         records = self.store.query_objects(object_type, filters)
         rule_def = self.ontology.rules[rule_name]
@@ -135,18 +137,6 @@ class RuleEngine:
                 "result_field": rule_def.result_field,
             })
         return results
-
-    def apply_to_record(self, rule_name: str, record: dict) -> Any:
-        rule_fn = self._compiled.get(rule_name)
-        if not rule_fn:
-            return None
-        return rule_fn(record)
-
-    def list_rules(self) -> list[tuple[str, RuleDef]]:
-        return list(self.ontology.rules.items())
-
-    def get_rules_for_object(self, object_type: str) -> dict[str, RuleDef]:
-        return self.ontology.get_rules_for_object(object_type)
 
     def execute_tool(self, name: str, args: dict) -> str:
         if name == "apply_rule":
