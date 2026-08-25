@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "OAG — Ontology Augmented Generation agent engine"
 requires-python = ">=3.11"
 dependencies = [
+    "openpyxl>=3.1",
     "pydantic>=2.0",
     "openai>=1.0",
     "socksio>=1.0",
