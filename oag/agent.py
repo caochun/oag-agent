@@ -79,7 +79,8 @@ class Agent:
 
     def chat_stream(self, message: str, session_id: str = "default",
                     allowed_tools: Iterable[str] | None = None,
-                    run_id: str = "") -> Generator[Event, None, None]:
+                    run_id: str = "",
+                    trace_user_message: str = "") -> Generator[Event, None, None]:
         if session_id in self._pending:
             yield TextEvent(content="当前会话有待确认的操作，请先确认或取消后再继续。")
             return
@@ -107,7 +108,7 @@ class Agent:
         last_snapshot_len = 0
         with self.harness.genai_trace.invocation(
             session_id=session_id,
-            user_message=message,
+            user_message=trace_user_message or message,
             run_id=run_id,
             model=self.model,
         ) as genai_span:
@@ -197,8 +198,15 @@ class Agent:
 
     def chat_stream_sse(self, message: str, session_id: str = "default",
                         allowed_tools: Iterable[str] | None = None,
-                        run_id: str = "") -> Generator[dict, None, None]:
-        for event in self.chat_stream(message, session_id, allowed_tools=allowed_tools, run_id=run_id):
+                        run_id: str = "",
+                        trace_user_message: str = "") -> Generator[dict, None, None]:
+        for event in self.chat_stream(
+            message,
+            session_id,
+            allowed_tools=allowed_tools,
+            run_id=run_id,
+            trace_user_message=trace_user_message,
+        ):
             yield event_to_dict(event)
 
     def get_history(self, session_id: str) -> list[dict]:

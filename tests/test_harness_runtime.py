@@ -831,7 +831,12 @@ def test_agent_exports_genai_otlp_trace_for_llm_and_tool_calls(tmp_path, monkeyp
 
     monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
 
-    events = list(agent.chat_stream("Look up asset A1", session_id="s1", run_id="run-1"))
+    events = list(agent.chat_stream(
+        "Augmented prompt with frontend state",
+        session_id="s1",
+        run_id="run-1",
+        trace_user_message="Look up asset A1",
+    ))
 
     assert any(event.type == "tool_call" for event in events)
     assert trace_path.exists()
@@ -850,6 +855,9 @@ def test_agent_exports_genai_otlp_trace_for_llm_and_tool_calls(tmp_path, monkeyp
     assert operations.count("execute_tool") == 1
 
     invoke_span = next(span for span, op in zip(spans, operations) if op == "invoke_agent")
+    invoke_attrs = {attr["key"]: attr["value"] for attr in invoke_span["attributes"]}
+    assert "Look up asset A1" in invoke_attrs["gen_ai.input.messages"]["stringValue"]
+    assert "Augmented prompt" not in invoke_attrs["gen_ai.input.messages"]["stringValue"]
     tool_span = next(span for span, op in zip(spans, operations) if op == "execute_tool")
     chat_spans = [span for span, op in zip(spans, operations) if op == "chat"]
     assert {span["traceId"] for span in spans} == {invoke_span["traceId"]}
