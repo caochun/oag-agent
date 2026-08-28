@@ -811,6 +811,55 @@ def test_agent_sets_default_trace_jsonl_path(tmp_path):
     assert harness.trace.jsonl_path == str(tmp_path / "trace_TestDomain.jsonl")
 
 
+def test_agent_exports_genai_otlp_trace_for_llm_and_tool_calls(tmp_path, monkeypatch):
+    trace_path = tmp_path / "genai-traces.json"
+    harness = make_harness(HarnessConfig(
+        enable_write_confirmation=False,
+        genai_trace_json_path=str(trace_path),
+    ))
+    harness.hooks._hooks["query_complete"] = []
+    agent = Agent(harness, DummyClient(), "dummy-model", db_dir=str(tmp_path))
+    responses = iter([
+        make_response(tool_calls=[
+            make_full_tool_call("lookup_asset", "tool_1", '{"asset_id":"A1"}'),
+        ]),
+        make_response(content="Asset A1 is ok."),
+    ])
+
+    def fake_call_llm_with_retry(_client, **_kwargs):
+        return next(responses)
+
+    monkeypatch.setattr("oag.loop.query_loop.call_llm_with_retry", fake_call_llm_with_retry)
+
+    events = list(agent.chat_stream("Look up asset A1", session_id="s1", run_id="run-1"))
+
+    assert any(event.type == "tool_call" for event in events)
+    assert trace_path.exists()
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
+    spans = trace["resourceSpans"][0]["scopeSpans"][0]["spans"]
+    operations = [
+        next(
+            attr["value"]["stringValue"]
+            for attr in span["attributes"]
+            if attr["key"] == "gen_ai.operation.name"
+        )
+        for span in spans
+    ]
+    assert operations.count("invoke_agent") == 1
+    assert operations.count("chat") == 2
+    assert operations.count("execute_tool") == 1
+
+    invoke_span = next(span for span, op in zip(spans, operations) if op == "invoke_agent")
+    tool_span = next(span for span, op in zip(spans, operations) if op == "execute_tool")
+    chat_spans = [span for span, op in zip(spans, operations) if op == "chat"]
+    assert {span["traceId"] for span in spans} == {invoke_span["traceId"]}
+    assert all(span.get("parentSpanId") == invoke_span["spanId"] for span in chat_spans)
+    assert tool_span.get("parentSpanId") == chat_spans[0]["spanId"]
+    tool_attrs = {attr["key"]: attr["value"] for attr in tool_span["attributes"]}
+    assert tool_attrs["gen_ai.tool.name"]["stringValue"] == "lookup_asset"
+    assert tool_attrs["gen_ai.tool.call.id"]["stringValue"] == "tool_1"
+
+
 def test_tool_pipeline_records_cache_hit_for_repeated_read_tool():
     harness = make_harness()
 

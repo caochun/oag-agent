@@ -65,6 +65,10 @@ class ConfirmationFlow:
             messages=messages,
             confirmed=True,
             cache_namespace=pending.cache_namespace,
+            tool_call_id=pending.tool_call_id,
+            genai_trace_id=pending.genai_trace_id,
+            genai_root_span_id=pending.genai_root_span_id,
+            genai_parent_span_id=pending.genai_parent_span_id,
         )
         yield ToolCallEvent(
             name=pending.tool_name,
@@ -106,6 +110,16 @@ class ConfirmationFlow:
             allowed_tools=pending.allowed_tools if pending else None,
             turn_count=pending.turn_count if pending else 0,
             stop_hook_active=pending.stop_hook_active if pending else False,
+            genai_trace_id=pending.genai_trace_id if pending else "",
+            genai_root_span_id=pending.genai_root_span_id if pending else "",
+            genai_parent_span_id=pending.genai_parent_span_id if pending else "",
         )
-        yield from self.run_loop(state)
+        if state.genai_trace_id:
+            with self.harness.genai_trace.context(
+                trace_id=state.genai_trace_id,
+                span_id="",
+            ):
+                yield from self.run_loop(state)
+        else:
+            yield from self.run_loop(state)
         self.save_messages(session_id, messages)

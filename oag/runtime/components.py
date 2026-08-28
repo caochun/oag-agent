@@ -22,6 +22,7 @@ from ..tools.pipeline import ToolExecutionPipeline, ToolResult
 from ..tools.registry import ToolRegistry
 from ..tools.runtime_tools import RuntimeTools
 from .config import HarnessConfig
+from .genai_trace import GenAITraceRecorder
 from .hooks import AuditLog, HookRegistry, audit_log_hook, business_review_hook, write_confirmation_hook
 from .stop_check import default_stop_hook
 from .trace import TraceRecorder
@@ -44,6 +45,7 @@ class HarnessComponents:
     tools: ToolRegistry
     cache: dict[str, ToolResult]
     trace: TraceRecorder
+    genai_trace: GenAITraceRecorder
     tool_pipeline: ToolExecutionPipeline
     runtime_tools: RuntimeTools
 
@@ -75,6 +77,11 @@ def build_harness_components(
     tools = ToolRegistry()
     cache: dict[str, ToolResult] = {}
     trace = TraceRecorder(jsonl_path=config.trace_jsonl_path)
+    genai_trace = GenAITraceRecorder(
+        json_path=config.genai_trace_json_path,
+        service_name=config.genai_trace_service_name,
+        provider_name=config.genai_trace_provider_name,
+    )
     # 工具 handler 尽量保持简单；统一的策略、校验、缓存、审计都在 pipeline 中完成。
     tool_pipeline = ToolExecutionPipeline(
         tools=tools,
@@ -83,6 +90,7 @@ def build_harness_components(
         audit=audit,
         cache=cache,
         trace=trace,
+        genai_trace=genai_trace,
         set_current_messages=set_current_messages,
     )
     runtime_tools = RuntimeTools(
@@ -106,6 +114,7 @@ def build_harness_components(
         tools=tools,
         cache=cache,
         trace=trace,
+        genai_trace=genai_trace,
         tool_pipeline=tool_pipeline,
         runtime_tools=runtime_tools,
     )

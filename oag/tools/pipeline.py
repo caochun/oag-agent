@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from ..runtime import ToolUseContext, TraceRecorder
+from ..runtime.genai_trace import GenAITraceRecorder, OTLP_STATUS_ERROR, OTLP_STATUS_OK
 from ..runtime.hooks import AuditLog, HookRegistry, HookResult
 from ..runtime.tool_result_store import persist_large_tool_result
 from .registry import ToolDef, ToolRegistry
@@ -42,6 +43,7 @@ class ToolExecutionPipeline:
                  audit: AuditLog,
                  cache: dict[str, ToolResult],
                  trace: TraceRecorder,
+                 genai_trace: GenAITraceRecorder,
                  set_current_messages: Callable[[list[dict] | None], None]):
         self.tools = tools
         self.ont = ontology_runtime
@@ -49,9 +51,43 @@ class ToolExecutionPipeline:
         self.audit = audit
         self.cache = cache
         self.trace = trace
+        self.genai_trace = genai_trace
         self.set_current_messages = set_current_messages
 
     def execute(self, tool_name: str, args: dict, context: ToolUseContext) -> ToolResult:
+        with self.genai_trace.tool_call(
+            tool_name=tool_name,
+            args=args,
+            tool_call_id=context.tool_call_id,
+            trace_id=context.genai_trace_id,
+            parent_span_id=context.genai_parent_span_id,
+        ) as genai_span:
+            try:
+                result = self._execute_with_trace_events(tool_name, args, context)
+            except Exception as exc:
+                if genai_span:
+                    genai_span.set_attribute("error.type", type(exc).__name__)
+                    genai_span.set_attribute("gen_ai.tool.call.result", {"error": str(exc)})
+                    genai_span.finish(status_code=OTLP_STATUS_ERROR, status_message=str(exc))
+                raise
+            if genai_span:
+                genai_span.set_attribute(
+                    "gen_ai.tool.call.result",
+                    _parse_json_if_possible(result.raw_content or result.content),
+                )
+                genai_span.set_attribute("oag.tool.blocked", result.blocked)
+                genai_span.set_attribute("oag.tool.needs_confirmation", result.needs_confirmation)
+                genai_span.set_attribute("oag.tool.truncated", result.truncated)
+                genai_span.set_attribute("oag.tool.block_reason", result.block_reason)
+                status_code = OTLP_STATUS_ERROR if result.blocked else OTLP_STATUS_OK
+                genai_span.finish(
+                    status_code=status_code,
+                    status_message=result.block_reason if result.blocked else "",
+                )
+            return result
+
+    def _execute_with_trace_events(self, tool_name: str, args: dict,
+                                   context: ToolUseContext) -> ToolResult:
         tool = self.tools.get(tool_name)
         if not tool:
             self.trace.record(
@@ -411,3 +447,10 @@ def _matches_json_type(value, expected: str | list[str]) -> bool:
     if expected == "null":
         return value is None
     return True
+
+
+def _parse_json_if_possible(value: str):
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return value

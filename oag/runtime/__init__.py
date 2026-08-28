@@ -5,11 +5,14 @@ runtime 包包含配置、状态对象、事件、hooks、trace、session 存储
 """
 
 from .config import HarnessConfig
+from .genai_trace import GenAISpan, GenAITraceRecorder
 from .state import PendingConfirmation, RunState, ToolUseContext
 from .trace import TraceEvent, TraceRecorder
 
 __all__ = [
     "HarnessConfig",
+    "GenAISpan",
+    "GenAITraceRecorder",
     "PendingConfirmation",
     "RunState",
     "ToolUseContext",

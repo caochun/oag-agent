@@ -16,6 +16,7 @@ from openai import OpenAI
 from .runtime.events import (
     Event, TextEvent, event_to_dict,
 )
+from .runtime.genai_trace import OTLP_STATUS_ERROR, OTLP_STATUS_OK
 from .harness import Harness
 from .loop.confirmation_flow import ConfirmationFlow
 from .loop.query_loop import QueryLoop
@@ -77,7 +78,8 @@ class Agent:
                 )
 
     def chat_stream(self, message: str, session_id: str = "default",
-                    allowed_tools: Iterable[str] | None = None) -> Generator[Event, None, None]:
+                    allowed_tools: Iterable[str] | None = None,
+                    run_id: str = "") -> Generator[Event, None, None]:
         if session_id in self._pending:
             yield TextEvent(content="当前会话有待确认的操作，请先确认或取消后再继续。")
             return
@@ -103,25 +105,51 @@ class Agent:
         completed = False
         last_snapshot_at = monotonic()
         last_snapshot_len = 0
-        try:
-            for event in self._run_loop(state):
-                if isinstance(event, TextEvent) and event.content:
-                    streamed_content += event.content
-                    now = monotonic()
-                    if (
-                        len(streamed_content) - last_snapshot_len >= 512
-                        or now - last_snapshot_at >= 1.0
-                    ):
-                        self._save_stream_snapshot(session_id, messages, streamed_content)
-                        last_snapshot_at = now
-                        last_snapshot_len = len(streamed_content)
-                yield event
-            completed = True
-            self.sessions.save(session_id, messages)
-        finally:
-            if not completed and streamed_content:
-                self._save_stream_snapshot(session_id, messages, streamed_content)
-            self.harness.clear_tool_cache_namespace(cache_namespace)
+        with self.harness.genai_trace.invocation(
+            session_id=session_id,
+            user_message=message,
+            run_id=run_id,
+            model=self.model,
+        ) as genai_span:
+            if genai_span:
+                state.genai_trace_id = genai_span.trace_id
+                state.genai_root_span_id = genai_span.span_id
+                state.genai_parent_span_id = genai_span.span_id
+            try:
+                for event in self._run_loop(state):
+                    if isinstance(event, TextEvent) and event.content:
+                        streamed_content += event.content
+                        now = monotonic()
+                        if (
+                            len(streamed_content) - last_snapshot_len >= 512
+                            or now - last_snapshot_at >= 1.0
+                        ):
+                            self._save_stream_snapshot(session_id, messages, streamed_content)
+                            last_snapshot_at = now
+                            last_snapshot_len = len(streamed_content)
+                    yield event
+                completed = True
+                self.sessions.save(session_id, messages)
+            except Exception as exc:
+                if genai_span:
+                    genai_span.set_attribute("error.type", type(exc).__name__)
+                    genai_span.finish(status_code=OTLP_STATUS_ERROR, status_message=str(exc))
+                raise
+            finally:
+                if genai_span:
+                    output = self._last_assistant_message(messages) or streamed_content
+                    if output:
+                        genai_span.set_attribute("gen_ai.output.messages", [
+                            {
+                                "role": "assistant",
+                                "parts": [{"type": "text", "content": output}],
+                                "finish_reason": "stop" if completed else "error",
+                            }
+                        ])
+                    genai_span.finish(status_code=OTLP_STATUS_OK if completed else OTLP_STATUS_ERROR)
+                if not completed and streamed_content:
+                    self._save_stream_snapshot(session_id, messages, streamed_content)
+                self.harness.clear_tool_cache_namespace(cache_namespace)
 
     def _run_loop(self, state: RunState) -> Generator[Event, None, None]:
         yield from self.query_loop.run(state)
@@ -135,6 +163,13 @@ class Agent:
             else:
                 snapshot.append({"role": "assistant", "content": streamed_content})
         self.sessions.save(session_id, snapshot)
+
+    @staticmethod
+    def _last_assistant_message(messages: list[dict]) -> str:
+        for message in reversed(messages):
+            if message.get("role") == "assistant" and message.get("content"):
+                return str(message.get("content") or "")
+        return ""
 
     def _set_pending_confirmation(self, session_id: str, tool_name: str, args: dict,
                                   tool_call_id: str, messages: list[dict],
@@ -152,14 +187,18 @@ class Agent:
             allowed_tools=state.allowed_tools,
             turn_count=state.turn_count,
             stop_hook_active=state.stop_hook_active,
+            genai_trace_id=state.genai_trace_id,
+            genai_root_span_id=state.genai_root_span_id,
+            genai_parent_span_id=state.genai_parent_span_id,
         )
 
     def sessions_save(self, session_id: str, messages: list[dict]):
         self.sessions.save(session_id, messages)
 
     def chat_stream_sse(self, message: str, session_id: str = "default",
-                        allowed_tools: Iterable[str] | None = None) -> Generator[dict, None, None]:
-        for event in self.chat_stream(message, session_id, allowed_tools=allowed_tools):
+                        allowed_tools: Iterable[str] | None = None,
+                        run_id: str = "") -> Generator[dict, None, None]:
+        for event in self.chat_stream(message, session_id, allowed_tools=allowed_tools, run_id=run_id):
             yield event_to_dict(event)
 
     def get_history(self, session_id: str) -> list[dict]:

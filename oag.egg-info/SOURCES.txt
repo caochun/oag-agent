@@ -37,6 +37,7 @@ oag/runtime/__init__.py
 oag/runtime/components.py
 oag/runtime/config.py
 oag/runtime/events.py
+oag/runtime/genai_trace.py
 oag/runtime/hooks.py
 oag/runtime/message_sanitizer.py
 oag/runtime/session_store.py
@@ -49,3 +50,4 @@ oag/tools/pipeline.py
 oag/tools/registry.py
 oag/tools/runtime_tools.py
 tests/test_harness_runtime.py
+tests/test_ontology_policies.py

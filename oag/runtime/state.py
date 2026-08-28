@@ -14,6 +14,9 @@ class RunState:
     stop_hook_active: bool = False
     transition_reason: str | None = None
     cache_namespace: str = ""
+    genai_trace_id: str = ""
+    genai_root_span_id: str = ""
+    genai_parent_span_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -29,6 +32,9 @@ class PendingConfirmation:
     turn_count: int = 0
     stop_hook_active: bool = False
     cache_namespace: str = ""
+    genai_trace_id: str = ""
+    genai_root_span_id: str = ""
+    genai_parent_span_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -42,3 +48,7 @@ class ToolUseContext:
     cancelled: bool = False
     storage_dir: str | None = None
     cache_namespace: str = ""
+    tool_call_id: str = ""
+    genai_trace_id: str = ""
+    genai_root_span_id: str = ""
+    genai_parent_span_id: str = ""

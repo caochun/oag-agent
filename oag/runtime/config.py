@@ -19,3 +19,6 @@ class HarnessConfig:
     include_ontology_full_context: bool = False
     enable_analysis_tools: bool = False
     trace_jsonl_path: str = ""
+    genai_trace_json_path: str = ""
+    genai_trace_service_name: str = "oag-agent"
+    genai_trace_provider_name: str = "openai"

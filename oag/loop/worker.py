@@ -126,6 +126,7 @@ class Worker:
                             source="worker",
                             confirmed=False,
                             cache_namespace=self.cache_namespace,
+                            tool_call_id=tc.id,
                         ),
                     )
                 except (json.JSONDecodeError, ValueError) as exc:

@@ -51,6 +51,7 @@ class Harness:
         self.tools = components.tools
         self._cache = components.cache
         self.trace = components.trace
+        self.genai_trace = components.genai_trace
         self.tool_pipeline = components.tool_pipeline
         self.runtime_tools = components.runtime_tools
         self._static_prompt_cache: dict[str, list[str]] = {}

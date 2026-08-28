@@ -17,6 +17,11 @@ from ..runtime.events import (
     CompactEvent, ConfirmationEvent, DebugEvent, Event, QuestionEvent,
     ReasoningEvent, TextEvent, ToolCallEvent, ToolResultEvent,
 )
+from ..runtime.genai_trace import (
+    OTLP_STATUS_ERROR,
+    OTLP_STATUS_OK,
+    finish_reason_for_message,
+)
 from ..llm.retry import call_llm_with_retry
 from ..runtime import RunState
 from ..tools.pipeline import ToolResult
@@ -93,32 +98,7 @@ class QueryLoop:
             self._record_context_usage(state, tools)
             yield self._build_request_debug_event(state)
 
-            try:
-                response = call_llm_with_retry(
-                    self.client,
-                    **self._request_kwargs(
-                        messages=messages,
-                        tools=tools if tools else None,
-                        stream=True,
-                    ),
-                )
-            except Exception as exc:
-                if not self._is_context_overflow_error(exc):
-                    raise
-                compacted = yield from self._compact_after_overflow(state)
-                if not compacted:
-                    raise
-                messages = state.messages
-                self._record_context_usage(state, tools)
-                response = call_llm_with_retry(
-                    self.client,
-                    **self._request_kwargs(
-                        messages=messages,
-                        tools=tools if tools else None,
-                        stream=True,
-                    ),
-                )
-            msg = yield from self._consume_llm_response(response)
+            msg = yield from self._request_llm_with_trace(state, messages, tools)
 
             if not msg.tool_calls:
                 yield from self._handle_final_response(
@@ -193,6 +173,7 @@ class QueryLoop:
 
             state.stop_hook_active = False
             state.transition_reason = "next_turn"
+            state.genai_parent_span_id = ""
             self.harness.trace.record(
                 "agent_transition",
                 session_id=state.session_id,
@@ -211,15 +192,7 @@ class QueryLoop:
             {"role": "system", "content": instruction},
         ]
         try:
-            response = call_llm_with_retry(
-                self.client,
-                **self._request_kwargs(
-                    messages=request_messages,
-                    tools=None,
-                    stream=True,
-                ),
-            )
-            msg = yield from self._consume_llm_response(response)
+            msg = yield from self._request_llm_with_trace(state, request_messages, [])
             content = (msg.content or "").strip()
             already_streamed = getattr(msg, "content_streamed", False)
         except Exception as exc:
@@ -275,6 +248,64 @@ class QueryLoop:
             raise _ToolExecutionPaused(pending_events)
         for event in pending_events:
             yield event
+
+    def _request_llm_with_trace(self, state: RunState, messages: list[dict],
+                                tools: list[dict]) -> Generator[Event, None, SimpleNamespace]:
+        request_kwargs = self._request_kwargs(
+            messages=messages,
+            tools=tools if tools else None,
+            stream=True,
+        )
+        with self.harness.genai_trace.chat(
+            messages=messages,
+            tools=tools if tools else None,
+            model=self.model,
+            temperature=request_kwargs.get("temperature"),
+            max_tokens=request_kwargs.get("max_tokens"),
+            stream=request_kwargs.get("stream"),
+            trace_id=state.genai_trace_id,
+            parent_span_id=state.genai_root_span_id,
+        ) as genai_span:
+            if genai_span:
+                state.genai_trace_id = genai_span.trace_id
+                if not state.genai_root_span_id:
+                    state.genai_root_span_id = genai_span.span_id
+                genai_span.set_attribute("gen_ai.conversation.id", state.session_id)
+                genai_span.set_attribute("oag.session.id", state.session_id)
+                genai_span.set_attribute("oag.turn.count", state.turn_count)
+            try:
+                response = call_llm_with_retry(self.client, **request_kwargs)
+            except Exception as exc:
+                if genai_span:
+                    genai_span.set_attribute("error.type", type(exc).__name__)
+                    genai_span.finish(status_code=OTLP_STATUS_ERROR, status_message=str(exc))
+                if not self._is_context_overflow_error(exc):
+                    raise
+                compacted = yield from self._compact_after_overflow(state)
+                if not compacted:
+                    raise
+                if genai_span:
+                    genai_span.set_attribute("oag.context.compacted_after_overflow", True)
+                messages = state.messages
+                self._record_context_usage(state, tools)
+                response = call_llm_with_retry(
+                    self.client,
+                    **self._request_kwargs(
+                        messages=messages,
+                        tools=tools if tools else None,
+                        stream=True,
+                    ),
+                )
+            msg = yield from self._consume_llm_response(response)
+            if genai_span:
+                genai_span.set_attribute("gen_ai.output.messages", [
+                    self._genai_output_message(msg),
+                ])
+                usage = getattr(response, "usage", None)
+                self._record_response_usage(genai_span, usage)
+                genai_span.finish(status_code=OTLP_STATUS_OK)
+                state.genai_parent_span_id = genai_span.span_id
+            return msg
 
     def _handle_tool_result(self, state: RunState, messages: list[dict], msg,
                             index: int, tc, args: dict,
@@ -361,6 +392,43 @@ class QueryLoop:
             turn_count=state.turn_count,
             reason="final_response",
         )
+
+    def _genai_output_message(self, msg) -> dict:
+        parts: list[dict] = []
+        if msg.content not in (None, ""):
+            parts.append({"type": "text", "content": str(msg.content)})
+        for tool_call in msg.tool_calls or []:
+            parts.append({
+                "type": "tool_call",
+                "id": str(tool_call.id or ""),
+                "name": str(tool_call.function.name or ""),
+                "arguments": self._decode_tool_arguments(tool_call.function.arguments),
+            })
+        if not parts:
+            parts.append({"type": "text", "content": ""})
+        return {
+            "role": "assistant",
+            "parts": parts,
+            "finish_reason": finish_reason_for_message(msg),
+        }
+
+    @staticmethod
+    def _decode_tool_arguments(raw_args: str):
+        try:
+            return json.loads(raw_args or "{}")
+        except json.JSONDecodeError:
+            return raw_args or ""
+
+    @staticmethod
+    def _record_response_usage(span, usage) -> None:
+        if not usage:
+            return
+        prompt_tokens = getattr(usage, "prompt_tokens", None)
+        completion_tokens = getattr(usage, "completion_tokens", None)
+        if prompt_tokens is not None:
+            span.set_attribute("gen_ai.usage.input_tokens", int(prompt_tokens))
+        if completion_tokens is not None:
+            span.set_attribute("gen_ai.usage.output_tokens", int(completion_tokens))
 
     def _build_request_debug_event(self, state: RunState) -> DebugEvent:
         debug_msgs = []

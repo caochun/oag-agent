@@ -66,6 +66,10 @@ class ToolExecutor:
                 messages=state.messages,
                 confirmed=False,
                 cache_namespace=state.cache_namespace,
+                tool_call_id=tc.id,
+                genai_trace_id=state.genai_trace_id,
+                genai_root_span_id=state.genai_root_span_id,
+                genai_parent_span_id=state.genai_parent_span_id,
             ),
         )
         return [(tc, args, result)]
@@ -84,6 +88,10 @@ class ToolExecutor:
                         messages=state.messages,
                         confirmed=False,
                         cache_namespace=state.cache_namespace,
+                        tool_call_id=tc.id,
+                        genai_trace_id=state.genai_trace_id,
+                        genai_root_span_id=state.genai_root_span_id,
+                        genai_parent_span_id=state.genai_parent_span_id,
                     ),
                 ): (tc, args)
                 for tc, args in batch
