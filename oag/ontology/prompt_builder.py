@@ -75,7 +75,7 @@ class OntologyPromptBuilder:
                 suffix = f" [{', '.join(extras)}]" if extras else ""
                 parts.append(f"- {lname}: {ldef.source} → {ldef.target}{suffix}")
 
-        if self.ontology.rules:
+        if self.ontology.rules and any(self._is_tool_visible(name) for name in ("apply_rule", "apply_rule_batch")):
             parts.append("\n## 可用规则（确定性，无需推理）")
             for rname, rdef in self.ontology.rules.items():
                 applies = ", ".join(rdef.applies_to)
@@ -291,7 +291,7 @@ class OntologyPromptBuilder:
                 lines.append(f"规则: {fdef.hint.strip()}")
             if fdef.params:
                 params = ", ".join(
-                    f"{p}({d.type}): {d.description}"
+                    f"{p}({d.type}{'*' if d.is_required else ''}): {d.description}"
                     for p, d in fdef.params.items()
                 )
                 lines.append(f"参数: {params}")

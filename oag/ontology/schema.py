@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 STANDARD_RUNTIME_TOOLS = frozenset({
@@ -90,6 +90,25 @@ class FunctionParam(BaseModel):
     type: str = "str"
     description: str = ""
     default: Any = None
+    required: bool | None = None
+    json_schema: dict[str, Any] = {}
+
+    @property
+    def is_required(self) -> bool:
+        # Preserve older domains' default-based convention.
+        return self.default is None if self.required is None else self.required
+
+
+class FunctionToolPolicy(BaseModel):
+    """Explicit overrides; omitted fields retain the registrar's defaults."""
+
+    model_config = ConfigDict(extra="forbid")
+    read_only: bool | None = None
+    requires_confirmation: bool | None = None
+    worker_allowed: bool | None = None
+    idempotent: bool | None = None
+    invalidates_cache: bool | None = None
+    destructive: bool | None = None
 
 
 class Precondition(BaseModel):
@@ -121,9 +140,11 @@ class FunctionDef(BaseModel):
     depends_on: list[str] = []
     hint: str = ""
     params: dict[str, FunctionParam] = {}
-    function_type: str = ""  # business / lookup / get
+    function_type: str = ""  # business / computation / lookup / get
     timeout_seconds: float | None = 30.0
     concurrency_safe: bool | None = None
+    tool_policy: FunctionToolPolicy = FunctionToolPolicy()
+    max_result_chars: int = 12000
     writes_to: list[str] = []
     involves_objects: list[str] = []
     preconditions: list[Precondition] = []

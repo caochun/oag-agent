@@ -48,7 +48,7 @@ class DataExecutor:
                 return json.dumps(rows, ensure_ascii=False, default=str)
 
             if name == "describe":
-                result = self._describe(args["object_type"], args.get("column"))
+                result = self._describe(args["object_type"], args.get("column"), args.get("filters"))
                 return json.dumps(result, ensure_ascii=False, default=str)
 
             if name == "pivot":
@@ -107,10 +107,10 @@ class DataExecutor:
     # Analytics
     # ------------------------------------------------------------------
 
-    def _describe(self, object_type: str, column: str | None = None) -> dict:
-        rows = self.store.query(object_type)
+    def _describe(self, object_type: str, column: str | None = None, filters: dict | None = None) -> dict:
+        rows = self.store.query(object_type, filters)
         if not rows:
-            return {"error": f"{object_type} has no data"}
+            return {"rows": 0, "count": 0, "note": f"{object_type} 没有匹配数据", "filters": filters or {}}
         # Pandas 只用于对查询结果做小规模内存分析，不是权威数据源。
         df = pd.DataFrame(rows).drop(columns=["_id"], errors="ignore")
 

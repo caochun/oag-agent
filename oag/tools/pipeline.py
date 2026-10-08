@@ -147,7 +147,7 @@ class ToolExecutionPipeline:
         result = self._execute_handler(tool_name, args, tool, context)
         self._store_cache_result(tool_name, args, tool, result, context)
 
-        if tool_name == "mutate" and not result.blocked:
+        if (tool_name == "mutate" or tool.policy.invalidates_cache) and not result.blocked:
             self.cache.clear()
 
         self._record_tool_result("tool_end", tool_name, context, result)
@@ -231,7 +231,7 @@ class ToolExecutionPipeline:
 
     def _get_cached_result(self, tool_name: str, args: dict, tool: ToolDef,
                            context: ToolUseContext) -> ToolResult | None:
-        if not tool.is_read_only:
+        if not tool.is_read_only or not tool.policy.idempotent:
             return None
         return self.cache.get(self._cache_key(tool_name, args, context))
 
@@ -323,7 +323,7 @@ class ToolExecutionPipeline:
 
     def _store_cache_result(self, tool_name: str, args: dict, tool: ToolDef,
                             result: ToolResult, context: ToolUseContext):
-        if tool.is_read_only:
+        if tool.is_read_only and tool.policy.idempotent:
             self.cache[self._cache_key(tool_name, args, context)] = result
 
     def _run_post_tool_hooks(self, tool_name: str, args: dict, tool: ToolDef,

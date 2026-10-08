@@ -64,14 +64,16 @@ class RuntimeTools:
             parameters={"type": "object", "properties": {
                 "path": {"type": "string", "description": "persisted 工具结果中的 path"},
                 "max_chars": {"type": "integer", "description": "最多返回字符数，默认12000，最多50000；只有确需完整核对时才显式加大"},
+                "offset": {"type": "integer", "minimum": 0, "description": "从第几个字符开始，默认0；后续页使用 next_offset"},
             }, "required": ["path"]},
             handler=lambda args: read_persisted_tool_result(
                 path=args.get("path", ""),
                 max_chars=args.get("max_chars", 12000) or 12000,
+                offset=args.get("offset", 0),
             ),
-            usage_prompt="仅当某个工具结果返回 persisted=true 且预览不足以回答时调用。优先读取默认长度或小片段；不要为了综合回答无条件读取完整大结果。需要更多证据时，先定向调用领域工具缩小范围，或显式设置较小 max_chars 分段读取。不要用领域 read_document 读取 /tmp/oag-tool-results 或 tool-results 路径；业务文档仍使用领域自己的读取工具。",
+            usage_prompt="仅当某个工具结果返回 persisted=true 且预览不足以回答时调用。优先读取默认长度或小片段；需要后续内容时用返回的 next_offset 作为 offset 翻页，has_more=false 时结束。需要更多证据也可定向调用领域工具缩小范围。不要用领域 read_document 读取 /tmp/oag-tool-results 或 tool-results 路径；业务文档仍使用领域自己的读取工具。",
             category="query",
-            max_result_chars=20000,
+            max_result_chars=320000,  # JSON escaping must not persist a page into another file.
             policy=ToolPolicy(
                 read_only=True,
                 requires_confirmation=False,

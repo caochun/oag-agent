@@ -85,7 +85,7 @@ class OntologyToolRegistrar:
 
         tools.register(ToolDef(
             name="describe", description="统计摘要",
-            parameters={"type": "object", "properties": {"object_type": {"type": "string", "enum": obj_types}, "column": {"type": "string"}}, "required": ["object_type"]},
+            parameters={"type": "object", "properties": {"object_type": {"type": "string", "enum": obj_types}, "column": {"type": "string"}, "filters": {"type": "object", "description": "只统计匹配这些属性条件的对象"}}, "required": ["object_type"]},
             handler=lambda args: data.execute("describe", args),
             category="analysis",
         ))
@@ -188,12 +188,23 @@ class OntologyToolRegistrar:
                 props[pname] = {
                     "type": JSON_SCHEMA_TYPE_MAP.get(pdef.type, "string"),
                     "description": pdef.description,
+                    **pdef.json_schema,
                 }
-                if pdef.default is None:
+                if pdef.is_required:
                     required.append(pname)
 
             has_writes = bool(fdef.writes_to)
             is_business = fdef.function_type == "business"
+            policy = ToolPolicy(**{
+                "read_only": not has_writes,
+                "requires_confirmation": has_writes or is_business,
+                "concurrency_safe": not has_writes if fdef.concurrency_safe is None else fdef.concurrency_safe,
+                "worker_allowed": not (has_writes or is_business),
+                "idempotent": not has_writes,
+                "destructive": has_writes or is_business,
+                "timeout_seconds": fdef.timeout_seconds,
+                **fdef.tool_policy.model_dump(exclude_none=True),
+            })
             fn_name = name
             tools.register(ToolDef(
                 name=fn_name,
@@ -201,23 +212,9 @@ class OntologyToolRegistrar:
                 parameters={"type": "object", "properties": props, "required": required},
                 handler=lambda args, _n=fn_name: data.execute(_n, args),
                 usage_prompt=fdef.usage_prompt or fdef.hint,
-                category="action" if has_writes else "query",
-                is_read_only=not has_writes,
-                requires_confirmation=has_writes or is_business,
-                max_result_chars=12000,
-                policy=ToolPolicy(
-                    read_only=not has_writes,
-                    requires_confirmation=has_writes or is_business,
-                    concurrency_safe=(
-                        not has_writes
-                        if fdef.concurrency_safe is None
-                        else fdef.concurrency_safe
-                    ),
-                    worker_allowed=not (has_writes or is_business),
-                    idempotent=not has_writes,
-                    destructive=has_writes or is_business,
-                    timeout_seconds=fdef.timeout_seconds,
-                ),
+                category="query" if policy.read_only else "action",
+                max_result_chars=fdef.max_result_chars,
+                policy=policy,
             ))
 
     def _generic_search_description(self) -> str:

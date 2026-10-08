@@ -145,6 +145,8 @@ class OntologyValidator:
         if not fdef:
             return False
 
+        if fdef.tool_policy.requires_confirmation is not None:
+            return fdef.tool_policy.requires_confirmation
         if fdef.writes_to:
             return not self._all_agent_append_only(fdef.writes_to)
         return fdef.function_type == "business"

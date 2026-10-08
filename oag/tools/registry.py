@@ -17,6 +17,7 @@ class ToolPolicy:
     concurrency_safe: bool = True
     worker_allowed: bool = True
     idempotent: bool = True
+    invalidates_cache: bool = False
     destructive: bool = False
     timeout_seconds: float | None = 30.0
 

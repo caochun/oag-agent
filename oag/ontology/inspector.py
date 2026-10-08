@@ -40,6 +40,8 @@ class OntologyInspector:
                 "function_type": fdef.function_type,
                 "timeout_seconds": fdef.timeout_seconds,
                 "concurrency_safe": fdef.concurrency_safe,
+                "tool_policy": fdef.tool_policy.model_dump(exclude_none=True),
+                "max_result_chars": fdef.max_result_chars,
                 "writes_to": fdef.writes_to,
                 "involves_objects": fdef.involves_objects,
                 "preconditions": [
@@ -68,7 +70,8 @@ class OntologyInspector:
                     for tc in fdef.temporal_constraints
                 ],
                 "params": {
-                    p: {"type": d.type, "description": d.description, "default": d.default}
+                    p: {"type": d.type, "description": d.description, "default": d.default,
+                        "required": d.is_required, "json_schema": d.json_schema}
                     for p, d in fdef.params.items()
                 },
             }, ensure_ascii=False, default=str)

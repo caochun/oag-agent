@@ -23,6 +23,7 @@ from oag.ontology.schema import (
     Effect,
     FunctionDef,
     FunctionParam,
+    FunctionToolPolicy,
     Ontology,
     ObjectSourceDef,
     ObjectTypeDef,
@@ -341,6 +342,49 @@ def test_function_tool_uses_ontology_execution_policy():
     details = json.loads(harness.execute_tool("inspect", {"name": "lookup_asset"}).content)
     assert details["timeout_seconds"] == 75
     assert details["concurrency_safe"] is False
+
+
+def test_declarative_function_contract_keeps_omitted_and_empty_scopes_distinct():
+    baseline = make_harness()
+    definition = FunctionDef(
+        function_type="computation", concurrency_safe=False, max_result_chars=32000,
+        tool_policy=FunctionToolPolicy(read_only=False, idempotent=False, worker_allowed=False,
+                                       requires_confirmation=False, invalidates_cache=True),
+        params={
+            "mode": FunctionParam(type="str", json_schema={"enum": ["current", "envelope"]}),
+            "ids": FunctionParam(type="list", required=False, json_schema={"items": {"type": "string"}}),
+            "hour": FunctionParam(type="float", required=False),
+        },
+    )
+    baseline.ontology.functions["calculate"] = definition
+    baseline.data.registry.register("calculate", lambda mode, ids=None, hour=None: {"ids": ids, "hour": hour}, definition)
+    harness = Harness(baseline.ontology, baseline.repository, baseline.data.registry, DummyClient(), "dummy")
+    assert json.loads(harness.execute_tool("calculate", {"mode": "current"}).content)["ids"] is None
+    assert json.loads(harness.execute_tool("calculate", {"mode": "current", "ids": []}).content)["ids"] == []
+    assert harness.execute_tool("calculate", {"mode": "invalid"}).blocked
+    assert harness.execute_tool("calculate", {"mode": "current", "ids": [1]}).blocked
+    assert harness.execute_tool("calculate", {}).blocked
+    assert harness.execute_tool("calculate", {"mode": "current"}, context=ToolUseContext(source="worker")).blocked
+    tool = harness.tools.get("calculate")
+    assert not tool.is_read_only and not tool.policy.idempotent
+    assert tool.policy.invalidates_cache and tool.max_result_chars == 32000
+    details = json.loads(harness.execute_tool("inspect", {"name": "calculate"}).content)
+    assert details["params"]["ids"]["required"] is False
+    assert details["params"]["ids"]["default"] is None
+    assert details["params"]["ids"]["json_schema"] == {"items": {"type": "string"}}
+    assert details["tool_policy"]["read_only"] is False
+
+
+def test_explicit_confirmation_policy_and_legacy_defaults_are_supported():
+    assert FunctionParam(type="float").is_required
+    assert not FunctionParam(type="float", default=0).is_required
+    assert not FunctionParam(type="float", default="").is_required
+    baseline = make_harness()
+    definition = baseline.ontology.functions["lookup_asset"]
+    definition.tool_policy.requires_confirmation = True
+    harness = Harness(baseline.ontology, baseline.repository, baseline.data.registry, DummyClient(), "dummy")
+    assert harness.ont.requires_confirmation("lookup_asset", {"asset_id": "A1"})
+    assert harness.execute_tool("lookup_asset", {"asset_id": "A1"}).needs_confirmation
 
 
 def test_function_param_types_map_to_json_schema_types():
@@ -913,6 +957,20 @@ def test_tool_cache_does_not_cross_agent_run_namespaces():
     ]
 
 
+def test_non_idempotent_read_tools_are_not_cached():
+    harness = make_harness()
+    tool = harness.tools.get("lookup_asset")
+    tool.policy.idempotent = False
+    calls = []
+    def handler(args):
+        calls.append(args)
+        return json.dumps({"sequence": len(calls)})
+    tool.handler = handler
+    harness.execute_tool("lookup_asset", {"asset_id": "A1"})
+    result = harness.execute_tool("lookup_asset", {"asset_id": "A1"})
+    assert json.loads(result.content)["sequence"] == 2
+
+
 def test_timeout_worker_inherits_context_variables():
     harness = make_harness()
     marker = ContextVar("test_tool_workspace", default="missing")
@@ -1084,6 +1142,25 @@ def test_read_tool_result_defaults_to_limited_window_and_caps_max_chars():
     capped_payload = json.loads(read_persisted_tool_result(path=str(payload_path), max_chars=100000))
     assert capped_payload["returned_chars"] == 50000
     assert capped_payload["truncated"] is True
+
+
+def test_read_tool_result_pages_beyond_first_fifty_thousand_characters():
+    harness = make_harness()
+    content = "甲" * 50000 + "尾部证据" * 300
+    harness.tools.register(ToolDef(
+        name="long_paged_result", description="Large result", parameters={"type": "object", "properties": {}},
+        handler=lambda args: content, max_result_chars=20,
+    ))
+    result = json.loads(harness.execute_tool("long_paged_result", {}).content)
+    page = json.loads(harness.execute_tool("read_tool_result", {"path": result["path"], "max_chars": 50000}).content)
+    assert page["content"] == content[:50000]
+    assert page["next_offset"] == 50000
+    tail = json.loads(harness.execute_tool("read_tool_result", {"path": result["path"], "offset": page["next_offset"]}).content)
+    assert tail["content"] == content[50000:]
+    assert tail["has_more"] is False
+    assert tail["next_offset"] is None
+    invalid = json.loads(read_persisted_tool_result(path=result["path"], offset=-1))
+    assert "error" in invalid
 
 
 def test_read_tool_result_rejects_non_tool_result_path(tmp_path):

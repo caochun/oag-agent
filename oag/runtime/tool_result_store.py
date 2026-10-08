@@ -40,6 +40,7 @@ def persist_large_tool_result(*, storage_dir: str | None,
 
 def read_persisted_tool_result(*, path: str,
                                max_chars: int = 12000,
+                               offset: int = 0,
                                storage_dir: str | None = None) -> str:
     display_path = str(Path(path).expanduser())
     requested = Path(path).expanduser().resolve()
@@ -54,15 +55,21 @@ def read_persisted_tool_result(*, path: str,
         )
     if not requested.exists() or not requested.is_file():
         return _json_error("未找到持久化工具结果文件。", path=str(requested))
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        return _json_error("offset 必须是非负整数。")
     max_chars = max(1000, min(int(max_chars or 12000), 50000))
     content = requested.read_text(encoding="utf-8", errors="replace")
-    truncated = len(content) > max_chars
+    page = content[offset:offset + max_chars]
+    has_more = offset + len(page) < len(content)
     return json.dumps({
         "path": display_path,
         "chars": len(content),
-        "returned_chars": min(len(content), max_chars),
-        "truncated": truncated,
-        "content": content[:max_chars],
+        "returned_chars": len(page),
+        "offset": offset,
+        "next_offset": offset + len(page) if has_more else None,
+        "has_more": has_more,
+        "truncated": offset > 0 or has_more,
+        "content": page,
         "hint": "这是通用持久化工具结果，不是领域文档；不要再用领域 read_document 读取该 path。",
     }, ensure_ascii=False)
 
